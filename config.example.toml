@@ -1,0 +1,55 @@
+[server]
+host = "backupserver"
+mac = "AA:BB:CC:DD:EE:FF"
+admin_user = "admin"
+poll_interval_secs = 15    # default
+poll_timeout_secs = 300    # default
+
+[borg]
+binary = "borg"            # or "/opt/borg/borg" for a specific version
+check_frequency_days = 30  # full check only every N days (otherwise: quick repo-check)
+
+[ntfy]
+url = "https://ntfy.example.com/backup-topic"
+# token = "tk_..."   # optional for private instances
+
+[[clients]]
+name = "client1"
+hostname = "client1.local"   # used for archive names and lockfile
+
+[clients.main_repo]
+path = "ssh://borguser@backupserver/backup/repos/client1"
+ssh_key = "/root/.ssh/borg_main_ed25519"
+passphrase_file = "/root/.borg-keys/client1.pass"
+sources = ["/data", "/etc", "/home"]
+compression = "auto,zstd"
+exclude_patterns = ["sh:/home/*/.cache"]
+
+[clients.offsite_repo]
+path = "ssh://borguser@backupserver/mnt/offsite/repos/client1"
+ssh_key = "/root/.ssh/borg_offsite_ed25519"
+passphrase_file = "/root/.borg-keys/client1-offsite.pass"
+sources = ["/data/paperless", "/data/docker-compose", "/etc", "/home"]
+compression = "auto,zstd"
+optional = true   # errors are warnings, not failures
+
+[keys]
+local_dir = "~/.borg-keys/"              # keyfiles + passphrases stored locally
+github_repo = "https://github.com/username/omega-backup-keys"  # optional, DR only
+
+[distribution]
+listen_port = 0           # 0 = random free port
+listen_timeout_secs = 300 # server stops after 5 min
+mdns_service = "_omega-backup._tcp"
+
+[retention]
+keep_daily = 7
+keep_weekly = 4
+keep_monthly = 12
+keep_yearly = 2
+
+[offsite_retention]
+keep_daily = 3
+keep_weekly = 2
+keep_monthly = 6
+keep_yearly = 0
