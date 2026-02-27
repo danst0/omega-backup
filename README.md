@@ -18,21 +18,29 @@ A secure, high-performance [BorgBackup](https://www.borgbackup.org/) orchestrati
 - **SSH:** Key-based authentication must be used between clients and the backup server.
 - **Rust (optional):** Required to build from source.
 
-## Getting Started
+## Installation
 
-### 1. Installation
+### Option 1: Binary Install (Recommended)
 
-Clone the repository and build using Cargo:
+The easiest way to install is using the automated script, which downloads the latest statically-linked binary from GitHub Releases.
 
 ```bash
-git clone https://github.com/youruser/omega-backup.git
-cd omega-backup
-cargo build --release
+curl -sL https://raw.githubusercontent.com/danst0/omega-backup/main/install.sh | sudo bash
 ```
 
-The binary will be available at `target/release/omega-backup`.
+### Option 2: Build from Source
 
-### 2. Initial Setup
+If you have Rust installed:
+
+```bash
+git clone https://github.com/danst0/omega-backup.git
+cd omega-backup
+cargo install --path .
+```
+
+## Getting Started
+
+### 1. Initial Setup
 
 Run the interactive setup wizard to generate your initial configuration:
 

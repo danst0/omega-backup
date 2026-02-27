@@ -9,6 +9,8 @@ mod restore;
 mod setup;
 mod ssh;
 mod wol;
+mod status;
+mod check;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -100,6 +102,15 @@ enum Commands {
         #[arg(long = "path")]
         paths: Vec<String>,
     },
+
+    /// Show backup status (management mode)
+    Status,
+
+    /// Run the interactive setup wizard (alias for `config`)
+    Setup,
+
+    /// Validate configuration and connectivity
+    CheckConfig,
 }
 
 #[derive(Debug, Subcommand)]
@@ -174,6 +185,11 @@ async fn run(cli: Cli) -> Result<()> {
             return Ok(());
         }
 
+        Commands::Setup => {
+            setup::run_wizard().await?;
+            return Ok(());
+        }
+
         _ => {}
     }
 
@@ -212,6 +228,18 @@ async fn run(cli: Cli) -> Result<()> {
                 paths,
             };
             restore::run_restore_test(&config, &client, &args).await?;
+        }
+
+        Commands::Status => {
+            status::run_status(&config).await?;
+        }
+
+        Commands::Setup => {
+            unreachable!("Handled above");
+        }
+
+        Commands::CheckConfig => {
+            check::run_check(&config).await?;
         }
 
         // Already handled above

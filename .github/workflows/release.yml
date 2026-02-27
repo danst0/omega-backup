@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-release:
+    name: Build Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build (Release)
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Package Binary
+        run: |
+          mkdir release
+          cp target/x86_64-unknown-linux-musl/release/omega-backup release/
+          strip release/omega-backup
+          cd release && tar -czvf omega-backup-x86_64-linux-musl.tar.gz omega-backup
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release/omega-backup-x86_64-linux-musl.tar.gz
+          generate_release_notes: true
