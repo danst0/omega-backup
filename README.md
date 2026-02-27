@@ -25,8 +25,10 @@ A secure, high-performance [BorgBackup](https://www.borgbackup.org/) orchestrati
 The easiest way to install is using the automated script, which downloads the latest statically-linked binary from GitHub Releases.
 
 ```bash
-curl -sL https://raw.githubusercontent.com/danst0/omega-backup/main/install.sh | sudo bash
+curl -sL https://raw.githubusercontent.com/danst0/omega-backup/main/install.sh | bash
 ```
+
+The script will attempt to install to `~/.local/bin` if available, or fall back to `/usr/local/bin` (which requires sudo).
 
 ### Option 2: Build from Source
 
