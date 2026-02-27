@@ -11,6 +11,7 @@ mod ssh;
 mod wol;
 mod status;
 mod check;
+mod update;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -111,6 +112,9 @@ enum Commands {
 
     /// Validate configuration and connectivity
     CheckConfig,
+
+    /// Update omega-backup to the latest version from GitHub
+    Update,
 }
 
 #[derive(Debug, Subcommand)]
@@ -190,12 +194,30 @@ async fn run(cli: Cli) -> Result<()> {
             return Ok(());
         }
 
+        Commands::Update => {
+            // We need config for update settings, but if it fails (e.g. no config file yet),
+            // we should probably fallback to defaults or just try to load.
+            // For now, let's load config properly so we respect custom repos.
+            let config = load_config(&cli)?;
+            let verbose = cli.verbose > 0;
+            update::run_update(&config, verbose).await?;
+            return Ok(());
+        }
+
         _ => {}
     }
 
     // All other commands require a config file
     let config = load_config(&cli)?;
     let verbose = cli.verbose > 0;
+    
+    // Spawn update check in the background
+    // We clone config for the task
+    let config_clone = config.clone();
+    let update_check_handle = tokio::spawn(async move {
+        update::check_for_updates(&config_clone).await
+    });
+
     let dry_run = cli.dry_run;
 
     // Log borg version on startup
@@ -242,8 +264,33 @@ async fn run(cli: Cli) -> Result<()> {
             check::run_check(&config).await?;
         }
 
+        Commands::Update => {
+            unreachable!("Handled above");
+        }
+
         // Already handled above
         Commands::Config { .. } | Commands::DiscoverMac { .. } => unreachable!(),
+    }
+
+    // Check if update task completed within a short timeout
+    // We only wait a tiny bit to avoid delaying CLI exit noticeably
+    match tokio::time::timeout(std::time::Duration::from_millis(500), update_check_handle).await {
+        Ok(Ok(Ok(Some(version)))) => {
+            // Using eprintln directly to ensure visibility even if logging is configured differently
+            eprintln!("\n🔔 A new version of omega-backup is available: {}!", version);
+            eprintln!("   Run 'omega-backup update' to install it.\n");
+        }
+        Ok(Ok(Ok(None))) => { /* Up to date */ }
+        Ok(Err(e)) => {
+            tracing::debug!("Update check task failed: {}", e);
+        }
+        Ok(Ok(Err(e))) => {
+            tracing::debug!("Update check failed: {}", e);
+        }
+        Err(_) => {
+            // Timeout - do nothing, just exit
+            tracing::debug!("Update check timed out");
+        }
     }
 
     Ok(())

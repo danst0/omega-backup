@@ -185,6 +185,40 @@ pub struct Config {
     #[serde(default)]
     pub retention: RetentionConfig,
     pub offsite_retention: Option<RetentionConfig>,
+    #[serde(default)]
+    pub update: UpdateConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UpdateConfig {
+    #[serde(default = "default_update_check_enabled")]
+    pub check_enabled: bool,
+    #[serde(default = "default_repo_owner")]
+    pub repo_owner: String,
+    #[serde(default = "default_repo_name")]
+    pub repo_name: String,
+    pub pinned_version: Option<String>,
+}
+
+fn default_update_check_enabled() -> bool {
+    true
+}
+fn default_repo_owner() -> String {
+    "danst0".to_string()
+}
+fn default_repo_name() -> String {
+    "omega-backup".to_string()
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            check_enabled: default_update_check_enabled(),
+            repo_owner: default_repo_owner(),
+            repo_name: default_repo_name(),
+            pinned_version: None,
+        }
+    }
 }
 
 impl Config {

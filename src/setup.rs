@@ -5,7 +5,7 @@ use tokio::process::Command;
 
 use crate::config::{
     BorgConfig, ClientConfig, Config, DistributionConfig, KeysConfig, NtfyConfig,
-    RepoConfig, RetentionConfig, ServerConfig, default_config_path, expand_tilde,
+    RepoConfig, RetentionConfig, ServerConfig, UpdateConfig, default_config_path, expand_tilde,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -221,6 +221,7 @@ async fn run_client_wizard() -> Result<()> {
         distribution: DistributionConfig::default(),
         retention: RetentionConfig::default(),
         offsite_retention: None,
+        update: UpdateConfig::default(),
     };
 
     let config_path = default_config_path();
@@ -423,6 +424,7 @@ async fn run_management_wizard() -> Result<()> {
         distribution: DistributionConfig::default(),
         retention: RetentionConfig::default(),
         offsite_retention: None,
+        update: UpdateConfig::default(),
     };
 
     let config_path = default_config_path();
