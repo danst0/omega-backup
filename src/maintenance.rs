@@ -212,7 +212,7 @@ async fn maintain_client(
     Ok(lines)
 }
 
-fn should_run_check(state: &AppState, client_name: &str, frequency_days: u32) -> bool {
+pub(crate) fn should_run_check(state: &AppState, client_name: &str, frequency_days: u32) -> bool {
     let Some(cs) = state.client(client_name) else {
         return true; // Never checked — run check
     };
@@ -227,4 +227,66 @@ fn should_run_check(state: &AppState, client_name: &str, frequency_days: u32) ->
     let last: DateTime<Local> = Local.from_local_datetime(&naive).single().unwrap_or_else(|| Local::now());
     let elapsed = Local::now().signed_duration_since(last);
     elapsed.num_days() >= frequency_days as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn days_ago(n: i64) -> String {
+        (Local::now() - chrono::TimeDelta::days(n))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string()
+    }
+
+    #[test]
+    fn test_no_client_state_needs_check() {
+        let state = AppState::default();
+        assert!(should_run_check(&state, "client1", 30));
+    }
+
+    #[test]
+    fn test_no_check_timestamp_needs_check() {
+        let mut state = AppState::default();
+        state.client_mut("client1").last_backup_result = Some("success".to_string());
+        // last_check_timestamp is None
+        assert!(should_run_check(&state, "client1", 30));
+    }
+
+    #[test]
+    fn test_recent_check_does_not_need_recheck() {
+        let mut state = AppState::default();
+        state.client_mut("client1").last_check_timestamp = Some(days_ago(0));
+        assert!(!should_run_check(&state, "client1", 30));
+    }
+
+    #[test]
+    fn test_old_check_needs_recheck() {
+        let mut state = AppState::default();
+        state.client_mut("client1").last_check_timestamp = Some("2000-01-01T00:00:00".to_string());
+        assert!(should_run_check(&state, "client1", 30));
+    }
+
+    #[test]
+    fn test_invalid_timestamp_needs_check() {
+        let mut state = AppState::default();
+        state.client_mut("client1").last_check_timestamp = Some("not-a-date".to_string());
+        assert!(should_run_check(&state, "client1", 30));
+    }
+
+    #[test]
+    fn test_exactly_at_boundary_needs_check() {
+        let mut state = AppState::default();
+        // 30 days ago: elapsed.num_days() == 30 >= 30 → true
+        state.client_mut("client1").last_check_timestamp = Some(days_ago(30));
+        assert!(should_run_check(&state, "client1", 30));
+    }
+
+    #[test]
+    fn test_one_day_before_boundary_no_check() {
+        let mut state = AppState::default();
+        // 29 days ago: elapsed.num_days() == 29 < 30 → false
+        state.client_mut("client1").last_check_timestamp = Some(days_ago(29));
+        assert!(!should_run_check(&state, "client1", 30));
+    }
 }

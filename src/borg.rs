@@ -452,3 +452,105 @@ pub async fn detect_version(binary: &str) -> Option<String> {
     let line = stdout.lines().next().unwrap_or("").to_string();
     Some(line)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── archive_name ─────────────────────────────────────────────
+
+    #[test]
+    fn test_archive_name_has_hostname_prefix() {
+        let name = archive_name("myhost");
+        assert!(name.starts_with("myhost-"), "got: {name}");
+    }
+
+    #[test]
+    fn test_archive_name_date_format() {
+        let name = archive_name("myhost");
+        // Format: myhost-YYYY-MM-DDTHH:MM:SS
+        let date = &name["myhost-".len()..];
+        assert_eq!(date.len(), 19, "date portion should be 19 chars, got: {date}");
+        assert!(date[..4].chars().all(|c| c.is_ascii_digit()), "year not digits");
+        assert_eq!(&date[4..5], "-");
+        assert_eq!(&date[10..11], "T", "missing T separator");
+        assert_eq!(&date[13..14], ":");
+        assert_eq!(&date[16..17], ":");
+    }
+
+    #[test]
+    fn test_archive_name_different_hosts_differ() {
+        assert_ne!(archive_name("client1"), archive_name("server"));
+    }
+
+    // ── parse_size_bytes ─────────────────────────────────────────
+
+    #[test]
+    fn test_parse_size_bytes_gb() {
+        assert_eq!(parse_size_bytes("  Original size:      1.00 GB"), 1_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_size_bytes_mb() {
+        assert_eq!(parse_size_bytes("  Compressed size:    512.00 MB"), 512_000_000);
+    }
+
+    #[test]
+    fn test_parse_size_bytes_kb() {
+        assert_eq!(parse_size_bytes("  Deduplicated size:  8.00 kB"), 8_000);
+    }
+
+    #[test]
+    fn test_parse_size_bytes_tb() {
+        // needs at least 4 whitespace-separated tokens (2-word key + value + unit)
+        assert_eq!(parse_size_bytes("  Total size:         2.00 TB"), 2_000_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_size_bytes_bytes() {
+        assert_eq!(parse_size_bytes("  Total size:         42.00 B"), 42);
+    }
+
+    #[test]
+    fn test_parse_size_bytes_malformed_returns_zero() {
+        assert_eq!(parse_size_bytes("not a size line"), 0);
+        assert_eq!(parse_size_bytes(""), 0);
+        assert_eq!(parse_size_bytes("Only three words"), 0);
+    }
+
+    // ── parse_create_stats ───────────────────────────────────────
+
+    #[test]
+    fn test_parse_create_stats_extracts_all_fields() {
+        let stderr = "\
+Original size:      1.00 GB
+Compressed size:    512.00 MB
+Deduplicated size:  8.00 kB
+";
+        let result = parse_create_stats("", stderr, "myhost-2026-02-27T02:00:00", 10.5);
+        assert_eq!(result.archive_name, "myhost-2026-02-27T02:00:00");
+        assert_eq!(result.duration_secs, 10.5);
+        assert_eq!(result.original_size, 1_000_000_000);
+        assert_eq!(result.compressed_size, 512_000_000);
+        assert_eq!(result.deduplicated_size, 8_000);
+    }
+
+    #[test]
+    fn test_parse_create_stats_empty_output() {
+        let result = parse_create_stats("", "", "archive-name", 5.0);
+        assert_eq!(result.archive_name, "archive-name");
+        assert_eq!(result.duration_secs, 5.0);
+        assert_eq!(result.original_size, 0);
+        assert_eq!(result.deduplicated_size, 0);
+    }
+
+    #[test]
+    fn test_parse_create_stats_stdout_and_stderr_combined() {
+        // original_size from stdout, dedup from stderr
+        let stdout = "Original size:      2.00 GB\n";
+        let stderr = "Deduplicated size:  16.00 kB\n";
+        let result = parse_create_stats(stdout, stderr, "arch", 1.0);
+        assert_eq!(result.original_size, 2_000_000_000);
+        assert_eq!(result.deduplicated_size, 16_000);
+    }
+}

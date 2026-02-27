@@ -327,3 +327,229 @@ impl AppState {
         self.0.get(name)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── expand_tilde ─────────────────────────────────────────────
+
+    #[test]
+    fn test_expand_tilde_home() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_tilde("~/foo/bar"), home.join("foo/bar"));
+    }
+
+    #[test]
+    fn test_expand_tilde_solo() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_tilde("~"), home);
+    }
+
+    #[test]
+    fn test_expand_tilde_no_tilde() {
+        assert_eq!(expand_tilde("/absolute/path"), std::path::PathBuf::from("/absolute/path"));
+        assert_eq!(expand_tilde("relative/path"), std::path::PathBuf::from("relative/path"));
+    }
+
+    // ── parse_mac_address ────────────────────────────────────────
+
+    #[test]
+    fn test_parse_mac_valid_uppercase() {
+        let mac = parse_mac_address("AA:BB:CC:DD:EE:FF").unwrap();
+        assert_eq!(mac, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    }
+
+    #[test]
+    fn test_parse_mac_valid_lowercase() {
+        let mac = parse_mac_address("aa:bb:cc:dd:ee:ff").unwrap();
+        assert_eq!(mac, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    }
+
+    #[test]
+    fn test_parse_mac_too_few_octets() {
+        assert!(parse_mac_address("AA:BB:CC:DD:EE").is_err());
+    }
+
+    #[test]
+    fn test_parse_mac_invalid_hex() {
+        assert!(parse_mac_address("GG:BB:CC:DD:EE:FF").is_err());
+    }
+
+    #[test]
+    fn test_parse_mac_wrong_separator() {
+        assert!(parse_mac_address("AA-BB-CC-DD-EE-FF").is_err());
+    }
+
+    // ── Config::load ─────────────────────────────────────────────
+
+    #[test]
+    fn test_config_load_minimal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, r#"
+[server]
+host = "myserver"
+mac = "AA:BB:CC:DD:EE:FF"
+admin_user = "admin"
+"#).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.server.host, "myserver");
+        assert_eq!(cfg.server.mac, "AA:BB:CC:DD:EE:FF");
+        // Defaults applied
+        assert_eq!(cfg.borg.binary, "borg");
+        assert_eq!(cfg.borg.check_frequency_days, 30);
+        assert_eq!(cfg.retention.keep_daily, 7);
+        assert_eq!(cfg.retention.keep_weekly, 4);
+        assert!(cfg.clients.is_empty());
+        assert!(cfg.ntfy.is_none());
+    }
+
+    #[test]
+    fn test_config_load_not_found() {
+        let err = Config::load(std::path::Path::new("/nonexistent/path/config.toml"))
+            .unwrap_err();
+        assert!(err.to_string().contains("not found") || err.to_string().contains("Config file"));
+    }
+
+    #[test]
+    fn test_config_validate_empty_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nhost = \"\"\nmac = \"AA:BB:CC:DD:EE:FF\"\nadmin_user = \"admin\"\n").unwrap();
+        assert!(Config::load(&path).is_err());
+    }
+
+    #[test]
+    fn test_config_validate_invalid_mac() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nhost = \"s\"\nmac = \"not-a-mac\"\nadmin_user = \"admin\"\n").unwrap();
+        assert!(Config::load(&path).is_err());
+    }
+
+    // ── Config::save + load round-trip ───────────────────────────
+
+    #[test]
+    fn test_config_save_load_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let original = Config {
+            server: ServerConfig {
+                host: "backup.local".to_string(),
+                mac: "11:22:33:44:55:66".to_string(),
+                admin_user: "borgadmin".to_string(),
+                poll_interval_secs: 20,
+                poll_timeout_secs: 120,
+            },
+            borg: BorgConfig {
+                binary: "/usr/bin/borg".to_string(),
+                check_frequency_days: 14,
+            },
+            ntfy: Some(NtfyConfig {
+                url: "https://ntfy.example.com/topic".to_string(),
+                token: Some("tk_test".to_string()),
+            }),
+            clients: vec![],
+            keys: KeysConfig::default(),
+            distribution: DistributionConfig::default(),
+            retention: RetentionConfig {
+                keep_daily: 3,
+                keep_weekly: 2,
+                keep_monthly: 6,
+                keep_yearly: 1,
+            },
+            offsite_retention: None,
+        };
+
+        original.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+
+        assert_eq!(loaded.server.host, "backup.local");
+        assert_eq!(loaded.server.mac, "11:22:33:44:55:66");
+        assert_eq!(loaded.server.poll_interval_secs, 20);
+        assert_eq!(loaded.borg.binary, "/usr/bin/borg");
+        assert_eq!(loaded.borg.check_frequency_days, 14);
+        assert_eq!(loaded.retention.keep_daily, 3);
+        assert_eq!(loaded.retention.keep_monthly, 6);
+        let ntfy = loaded.ntfy.unwrap();
+        assert_eq!(ntfy.url, "https://ntfy.example.com/topic");
+        assert_eq!(ntfy.token.as_deref(), Some("tk_test"));
+    }
+
+    // ── AppState serialisation ───────────────────────────────────
+
+    #[test]
+    fn test_app_state_round_trip() {
+        let mut state = AppState::default();
+        {
+            let cs = state.client_mut("client1");
+            cs.last_backup_timestamp = Some("2026-02-27T02:00:00".to_string());
+            cs.last_backup_result = Some("success".to_string());
+            cs.integrity_status = Some("ok".to_string());
+        }
+
+        let json = serde_json::to_string_pretty(&state.0).unwrap();
+        let map: std::collections::HashMap<String, ClientState> =
+            serde_json::from_str(&json).unwrap();
+        let loaded = AppState(map);
+
+        let cs = loaded.client("client1").unwrap();
+        assert_eq!(cs.last_backup_timestamp.as_deref(), Some("2026-02-27T02:00:00"));
+        assert_eq!(cs.last_backup_result.as_deref(), Some("success"));
+        assert_eq!(cs.integrity_status.as_deref(), Some("ok"));
+        assert!(loaded.client("nonexistent").is_none());
+    }
+
+    // ── Config::find_client ──────────────────────────────────────
+
+    #[test]
+    fn test_find_client() {
+        let cfg = Config {
+            server: ServerConfig {
+                host: "s".to_string(),
+                mac: "AA:BB:CC:DD:EE:FF".to_string(),
+                admin_user: "a".to_string(),
+                poll_interval_secs: 15,
+                poll_timeout_secs: 300,
+            },
+            borg: BorgConfig::default(),
+            ntfy: None,
+            clients: vec![
+                ClientConfig {
+                    name: "alpha".to_string(),
+                    hostname: "alpha.local".to_string(),
+                    main_repo: dummy_repo(),
+                    offsite_repo: None,
+                },
+                ClientConfig {
+                    name: "beta".to_string(),
+                    hostname: "beta.local".to_string(),
+                    main_repo: dummy_repo(),
+                    offsite_repo: None,
+                },
+            ],
+            keys: KeysConfig::default(),
+            distribution: DistributionConfig::default(),
+            retention: RetentionConfig::default(),
+            offsite_retention: None,
+        };
+
+        assert_eq!(cfg.find_client("alpha").unwrap().name, "alpha");
+        assert_eq!(cfg.find_client("beta").unwrap().hostname, "beta.local");
+        assert!(cfg.find_client("gamma").is_none());
+    }
+
+    fn dummy_repo() -> RepoConfig {
+        RepoConfig {
+            path: "ssh://user@host/repo".to_string(),
+            ssh_key: "/tmp/key".to_string(),
+            passphrase_file: "/tmp/pass".to_string(),
+            sources: vec!["/data".to_string()],
+            compression: "auto,zstd".to_string(),
+            exclude_patterns: vec![],
+            optional: false,
+        }
+    }
+}
