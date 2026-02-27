@@ -24,7 +24,7 @@ tracing-appender = "0.2"
 hkdf             = "0.12"
 sha2             = "0.10"
 hex              = "0.4"
-self_update      = { version = "0.41", features = ["archive-tar", "compression-flate2"] }
+self_update      = { version = "0.41", default-features = false, features = ["rustls", "archive-tar", "compression-flate2"] }
 serde_json       = "1.0"
 dirs             = "5.0"
 semver = "1.0.27"
