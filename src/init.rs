@@ -27,8 +27,11 @@ pub async fn run_init(config: &Config, client_filter: Option<&str>, dry_run: boo
     tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
     wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
 
-    let ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
+    let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
         .with_timeout(config.server.poll_interval_secs as u32);
+    if let Some(ref key) = config.server.admin_ssh_key {
+        ssh = ssh.with_key(key);
+    }
 
     println!("Waiting for backup server {} to come online...", config.server.host);
     ssh::poll_until_reachable(

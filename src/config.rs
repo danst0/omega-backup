@@ -18,6 +18,8 @@ pub struct ServerConfig {
     pub host: String,
     pub mac: String,
     pub admin_user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_ssh_key: Option<String>,
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
     #[serde(default = "default_poll_timeout")]
