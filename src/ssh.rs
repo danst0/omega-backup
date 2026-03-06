@@ -141,26 +141,56 @@ pub async fn poll_until_reachable(
     pb.enable_steady_tick(Duration::from_millis(120));
 
     loop {
-        if is_reachable(cfg).await {
-            pb.finish_with_message(format!("{} is online", cfg.host));
-            return Ok(());
+        match run_command(cfg, "true").await {
+            Ok(out) if out.success() => {
+                pb.finish_with_message(format!("{} is online", cfg.host));
+                return Ok(());
+            }
+            Ok(out) => {
+                // SSH connected but returned an error — show first stderr line
+                let elapsed = start.elapsed();
+                if elapsed >= timeout {
+                    pb.finish_with_message(format!("Timeout waiting for {}", cfg.host));
+                    anyhow::bail!(
+                        "SSH host {} did not become reachable within {:?}",
+                        cfg.host,
+                        timeout
+                    );
+                }
+                let hint = out.stderr.lines().next().unwrap_or("").trim().to_string();
+                if hint.is_empty() {
+                    pb.set_message(format!(
+                        "Waiting for {} to come online... ({:.0}s elapsed)",
+                        cfg.host,
+                        elapsed.as_secs_f64()
+                    ));
+                } else {
+                    pb.set_message(format!(
+                        "Waiting for {} ({:.0}s) — {}",
+                        cfg.host,
+                        elapsed.as_secs_f64(),
+                        hint
+                    ));
+                }
+            }
+            Err(_) => {
+                // Could not spawn SSH at all — treat like unreachable
+                let elapsed = start.elapsed();
+                if elapsed >= timeout {
+                    pb.finish_with_message(format!("Timeout waiting for {}", cfg.host));
+                    anyhow::bail!(
+                        "SSH host {} did not become reachable within {:?}",
+                        cfg.host,
+                        timeout
+                    );
+                }
+                pb.set_message(format!(
+                    "Waiting for {} to come online... ({:.0}s elapsed)",
+                    cfg.host,
+                    elapsed.as_secs_f64()
+                ));
+            }
         }
-
-        let elapsed = start.elapsed();
-        if elapsed >= timeout {
-            pb.finish_with_message(format!("Timeout waiting for {}", cfg.host));
-            anyhow::bail!(
-                "SSH host {} did not become reachable within {:?}",
-                cfg.host,
-                timeout
-            );
-        }
-
-        pb.set_message(format!(
-            "Waiting for {} to come online... ({:.0}s elapsed)",
-            cfg.host,
-            elapsed.as_secs_f64()
-        ));
         sleep(poll_interval).await;
     }
 }
