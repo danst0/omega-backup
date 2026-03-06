@@ -435,7 +435,7 @@ async fn announce_mdns(port: u16, service_type: &str) -> Result<MdnsHandle> {
     let instance_name = format!("omega-backup-{}", std::process::id());
 
     let service = ServiceInfo::new(
-        &format!("{}.", service_type),
+        &format!("{}.local.", service_type),
         &instance_name,
         &format!("{}.local.", get_hostname_str()),
         (),
@@ -454,7 +454,7 @@ async fn browse_mdns(service_type: &str) -> Result<(String, u16)> {
     use mdns_sd::{ServiceDaemon, ServiceEvent};
 
     let mdns = ServiceDaemon::new().context("Failed to create mDNS daemon")?;
-    let service_type_full = format!("{}.", service_type);
+    let service_type_full = format!("{}.local.", service_type);
     let receiver = mdns.browse(&service_type_full).context("Failed to start mDNS browse")?;
 
     let pb = ProgressBar::new_spinner();
