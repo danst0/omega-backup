@@ -91,11 +91,14 @@ impl BorgContext {
         let passphrase = self.read_passphrase()?;
         env.insert("BORG_PASSPHRASE".to_string(), passphrase);
 
+        // Suppress interactive "relocated repo" confirmation prompt
+        env.insert("BORG_RELOCATED_REPO_ACCESS_IS_OK".to_string(), "yes".to_string());
+
         if let Some(ref key) = self.ssh_key {
             let key_path = crate::config::expand_tilde(key);
             env.insert(
                 "BORG_RSH".to_string(),
-                format!("ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=accept-new", key_path.display()),
+                format!("ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=10 -o ServerAliveCountMax=3", key_path.display()),
             );
         }
 
