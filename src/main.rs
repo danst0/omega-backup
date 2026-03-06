@@ -126,6 +126,10 @@ enum ConfigAction {
     Sync {
         /// Client name to sync for (default: first client in config)
         client: Option<String>,
+
+        /// Skip mDNS discovery and connect directly (e.g. 192.168.1.10:54321)
+        #[arg(long, value_name = "HOST:PORT")]
+        host: Option<String>,
     },
 
     /// Push keyfile to GitHub repo (optional disaster-recovery backup)
@@ -165,12 +169,12 @@ async fn run(cli: Cli) -> Result<()> {
                     let config = load_config(&cli)?;
                     distribute::run_listen(&config).await?;
                 }
-                Some(ConfigAction::Sync { client }) => {
+                Some(ConfigAction::Sync { client, host }) => {
                     let config = load_config(&cli)?;
                     let client_name = client.clone().unwrap_or_else(|| {
                         config.clients.first().map(|c| c.name.clone()).unwrap_or_else(|| "client1".to_string())
                     });
-                    distribute::run_sync(&config, &client_name).await?;
+                    distribute::run_sync(&config, &client_name, host.as_deref()).await?;
                 }
                 Some(ConfigAction::PushKey { client }) => {
                     let config = load_config(&cli)?;

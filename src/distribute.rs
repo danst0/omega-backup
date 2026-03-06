@@ -135,6 +135,14 @@ pub async fn run_listen(config: &Config) -> Result<()> {
 
     println!("Announced via mDNS: {} on port {}", config.distribution.mdns_service, port);
 
+    // Print ready-to-paste fallback command
+    if let Some(ip) = local_ip() {
+        println!();
+        println!("  If mDNS doesn't work, run this on the client:");
+        println!("  omega-backup config sync --host {}:{}", ip, port);
+        println!();
+    }
+
     let timeout_secs = config.distribution.listen_timeout_secs;
     println!("Server will stop after {}s or Ctrl+C\n", timeout_secs);
 
@@ -268,7 +276,7 @@ async fn handle_get_config(State(state): State<ServerState>) -> impl IntoRespons
 // `omega-backup config sync` (client machine)
 // ────────────────────────────────────────────────────────────────
 
-pub async fn run_sync(config: &Config, client_name: &str) -> Result<()> {
+pub async fn run_sync(config: &Config, client_name: &str, host: Option<&str>) -> Result<()> {
     use dialoguer::Input;
 
     let code: String = Input::new()
@@ -278,13 +286,15 @@ pub async fn run_sync(config: &Config, client_name: &str) -> Result<()> {
 
     let session_key = derive_session_key(code.trim());
 
-    println!("Searching for management machine via mDNS...");
-
-    let (addr, port) = browse_mdns(&config.distribution.mdns_service).await?;
-
-    println!("Found management machine at {}:{}", addr, port);
-
-    let base_url = format!("http://{addr}:{port}");
+    let base_url = if let Some(h) = host {
+        println!("Connecting directly to {}...", h);
+        format!("http://{h}")
+    } else {
+        println!("Searching for management machine via mDNS...");
+        let (addr, port) = browse_mdns(&config.distribution.mdns_service).await?;
+        println!("Found management machine at {}:{}", addr, port);
+        format!("http://{addr}:{port}")
+    };
     let http = reqwest::Client::new();
 
     // Read passphrase
@@ -493,6 +503,14 @@ async fn browse_mdns(service_type: &str) -> Result<(String, u16)> {
             }
         }
     }
+}
+
+/// Returns the primary local (non-loopback) IP by connecting a UDP socket.
+fn local_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    Some(socket.local_addr().ok()?.ip().to_string())
 }
 
 fn get_hostname_str() -> String {
