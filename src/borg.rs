@@ -1,8 +1,12 @@
 use anyhow::{Context, Result};
 use chrono::Local;
 use std::collections::HashMap;
+use std::io::Write;
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::process::ChildStderr;
+use std::process::Stdio;
 
 #[derive(Debug, Error)]
 pub enum BorgError {
@@ -145,6 +149,114 @@ impl BorgContext {
             .into()),
         }
     }
+
+    /// Run a borg subcommand with streaming stderr output for live progress.
+    /// `\r`-terminated lines (borg progress) are printed to the terminal in-place;
+    /// `\n`-terminated lines (stats/info) are collected and returned.
+    async fn run_streaming(&self, args: &[&str]) -> Result<(i32, String, String)> {
+        let env = self.env_vars()?;
+
+        let mut cmd = Command::new(&self.binary);
+        cmd.args(args);
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        tracing::debug!("Running (streaming): {} {}", self.binary, args.join(" "));
+
+        let mut child = cmd.spawn().context("Failed to spawn borg process")?;
+
+        // Drain stdout in background
+        let mut stdout_handle = child.stdout.take().expect("stdout piped");
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = String::new();
+            let _ = stdout_handle.read_to_string(&mut buf).await;
+            buf
+        });
+
+        // Stream stderr: progress lines (\r) to terminal, stat lines (\n) collected
+        let mut stderr_handle: ChildStderr = child.stderr.take().expect("stderr piped");
+        let mut stderr_all = String::new();
+        let mut pending = String::new();
+        let mut chunk = vec![0u8; 2048];
+
+        loop {
+            match stderr_handle.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    pending.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    // Process complete segments
+                    loop {
+                        // Find the earliest terminator (\r or \n)
+                        let cr = pending.find('\r');
+                        let nl = pending.find('\n');
+                        match (cr, nl) {
+                            (None, None) => break,
+                            (Some(r), None) => {
+                                let segment = pending[..r].to_string();
+                                pending.drain(..=r);
+                                eprint!("\r{}", segment);
+                                let _ = std::io::stderr().flush();
+                            }
+                            (None, Some(n)) => {
+                                let line = pending[..n].to_string();
+                                pending.drain(..=n);
+                                stderr_all.push_str(&line);
+                                stderr_all.push('\n');
+                            }
+                            (Some(r), Some(n)) if r < n => {
+                                let segment = pending[..r].to_string();
+                                pending.drain(..=r);
+                                eprint!("\r{}", segment);
+                                let _ = std::io::stderr().flush();
+                            }
+                            (_, Some(n)) => {
+                                let line = pending[..n].to_string();
+                                pending.drain(..=n);
+                                stderr_all.push_str(&line);
+                                stderr_all.push('\n');
+                            }
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Flush remaining pending into stderr_all
+        if !pending.is_empty() {
+            stderr_all.push_str(&pending);
+        }
+
+        // Clear the progress line
+        eprint!("\r{:width$}\r", "", width = 100);
+        let _ = std::io::stderr().flush();
+
+        let status = child.wait().await.context("Failed to wait for borg process")?;
+        let exit_code = status.code().unwrap_or(-1);
+        let stdout = stdout_task.await.unwrap_or_default();
+
+        Ok((exit_code, stdout, stderr_all))
+    }
+
+    /// Streaming variant of `run_checked`.
+    async fn run_checked_streaming(&self, args: &[&str]) -> Result<(String, String)> {
+        let (code, stdout, stderr) = self.run_streaming(args).await?;
+        match code {
+            0 => Ok((stdout, stderr)),
+            1 => {
+                tracing::warn!("borg warning: {}", stderr.trim());
+                Ok((stdout, stderr))
+            }
+            _ => Err(BorgError::Failed {
+                exit_code: code,
+                stderr,
+            }
+            .into()),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -202,8 +314,8 @@ pub async fn create(
         "--stats".to_string(),
     ];
 
+    args.push("--progress".to_string());
     if ctx.verbose {
-        args.push("--progress".to_string());
         args.push("--list".to_string());
     }
 
@@ -220,7 +332,7 @@ pub async fn create(
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
     let start = std::time::Instant::now();
-    let (stdout, stderr) = ctx.run_checked(&args_ref).await?;
+    let (stdout, stderr) = ctx.run_checked_streaming(&args_ref).await?;
     let duration_secs = start.elapsed().as_secs_f64();
 
     let result = parse_create_stats(&stdout, &stderr, &name, duration_secs);
