@@ -147,7 +147,17 @@ pub async fn poll_until_reachable(
                 return Ok(());
             }
             Ok(out) => {
-                // SSH connected but returned an error — show first stderr line
+                // Detect fatal errors that won't resolve by retrying
+                if out.stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
+                    pb.finish_and_clear();
+                    anyhow::bail!(
+                        "Host key for {} has changed — known_hosts entry is stale.\n\
+                         Run on this machine:\n\
+                         \n  ssh-keygen -R {}\n  ssh-keygen -R {}\n",
+                        cfg.host, cfg.host, cfg.host
+                    );
+                }
+
                 let elapsed = start.elapsed();
                 if elapsed >= timeout {
                     pb.finish_with_message(format!("Timeout waiting for {}", cfg.host));
@@ -157,7 +167,14 @@ pub async fn poll_until_reachable(
                         timeout
                     );
                 }
-                let hint = out.stderr.lines().next().unwrap_or("").trim().to_string();
+
+                // Extract a readable hint: skip decorator lines (all @), take first real line
+                let hint = out.stderr.lines()
+                    .map(|l| l.trim())
+                    .find(|l| !l.is_empty() && !l.chars().all(|c| c == '@'))
+                    .unwrap_or("")
+                    .to_string();
+
                 if hint.is_empty() {
                     pb.set_message(format!(
                         "Waiting for {} to come online... ({:.0}s elapsed)",
