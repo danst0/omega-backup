@@ -2,8 +2,6 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -154,13 +152,8 @@ impl BorgContext {
 
     /// Run a borg subcommand with streaming stderr output for live progress.
     /// `\r`-terminated lines (borg progress) are printed to the terminal in-place;
-    /// `\n`-terminated lines (stats/info) are shown when verbose mode is active.
-    /// Press 'v' at any time to toggle verbose output.
+    /// `\n`-terminated lines are shown live when `self.verbose` is set.
     async fn run_streaming(&self, args: &[&str]) -> Result<(i32, String, String)> {
-        use crossterm::event::{self, Event, KeyCode};
-        use crossterm::terminal;
-        use std::io::IsTerminal;
-
         let env = self.env_vars()?;
 
         let mut cmd = Command::new(&self.binary);
@@ -183,46 +176,8 @@ impl BorgContext {
             buf
         });
 
-        // Verbose toggle — shared between key listener thread and stderr loop.
-        // Starts at the value set on BorgContext (CLI --verbose flag).
-        let verbose_live = Arc::new(AtomicBool::new(self.verbose));
-        let stop_flag = Arc::new(AtomicBool::new(false));
-
-        // Spawn key listener only when stderr is a real terminal.
-        let key_thread = if std::io::stderr().is_terminal() {
-            eprintln!("  [press 'v' to toggle verbose borg output]");
-            let verbose_key = verbose_live.clone();
-            let stop_key = stop_flag.clone();
-            Some(std::thread::spawn(move || {
-                if terminal::enable_raw_mode().is_err() {
-                    return;
-                }
-                loop {
-                    if stop_key.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    match event::poll(std::time::Duration::from_millis(100)) {
-                        Ok(true) => {
-                            if let Ok(Event::Key(key_event)) = event::read() {
-                                if key_event.code == KeyCode::Char('v') {
-                                    let cur = verbose_key.load(Ordering::Relaxed);
-                                    verbose_key.store(!cur, Ordering::Relaxed);
-                                    let msg = if !cur { "[verbose ON]" } else { "[verbose OFF]" };
-                                    eprint!("\r{:<80}\r\n", msg);
-                                    let _ = std::io::stderr().flush();
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                let _ = terminal::disable_raw_mode();
-            }))
-        } else {
-            None
-        };
-
-        // Stream stderr: progress lines (\r) to terminal, stat lines (\n) shown when verbose
+        // Stream stderr: \r lines → progress (overwrite current line)
+        //                \n lines → collect; also print live when verbose
         let mut stderr_handle: ChildStderr = child.stderr.take().expect("stderr piped");
         let mut stderr_all = String::new();
         let mut pending = String::new();
@@ -249,9 +204,8 @@ impl BorgContext {
                                 pending.drain(..=n);
                                 stderr_all.push_str(&line);
                                 stderr_all.push('\n');
-                                if verbose_live.load(Ordering::Relaxed) {
-                                    eprint!("\r{:<80}\r\n", line);
-                                    let _ = std::io::stderr().flush();
+                                if self.verbose {
+                                    eprintln!("\r{}", line);
                                 }
                             }
                             (Some(r), Some(n)) if r < n => {
@@ -265,9 +219,8 @@ impl BorgContext {
                                 pending.drain(..=n);
                                 stderr_all.push_str(&line);
                                 stderr_all.push('\n');
-                                if verbose_live.load(Ordering::Relaxed) {
-                                    eprint!("\r{:<80}\r\n", line);
-                                    let _ = std::io::stderr().flush();
+                                if self.verbose {
+                                    eprintln!("\r{}", line);
                                 }
                             }
                         }
@@ -288,13 +241,6 @@ impl BorgContext {
 
         let status = child.wait().await.context("Failed to wait for borg process")?;
         let exit_code = status.code().unwrap_or(-1);
-
-        // Stop key listener and restore terminal mode (at most 100 ms wait)
-        stop_flag.store(true, Ordering::Relaxed);
-        if let Some(t) = key_thread {
-            let _ = t.join();
-        }
-
         let stdout = stdout_task.await.unwrap_or_default();
 
         Ok((exit_code, stdout, stderr_all))

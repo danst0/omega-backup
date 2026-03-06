@@ -1,6 +1,6 @@
 [package]
 name = "omega-backup"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 
 [dependencies]
@@ -28,7 +28,6 @@ self_update      = { version = "0.41", default-features = false, features = ["ru
 serde_json       = "1.0"
 dirs             = "5.0"
 semver           = "1.0.27"
-crossterm        = "0.28"
 
 [dev-dependencies]
 tempfile = "3"
