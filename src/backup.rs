@@ -32,7 +32,7 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
 
     // Step 2: SSH poll
     let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
-        .with_timeout(config.server.poll_interval_secs as u32);
+        .with_timeout(10);
     if let Some(ref key) = config.server.admin_ssh_key {
         ssh = ssh.with_key(key);
     }

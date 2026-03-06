@@ -5,7 +5,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::post,
 };
 use std::{
     sync::{Arc, Mutex},
@@ -85,7 +85,6 @@ struct ReceivedData {
 struct ServerState {
     session_key: Arc<[u8; 32]>,
     received: Arc<Mutex<ReceivedData>>,
-    config_template: Arc<Vec<u8>>,
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -101,24 +100,14 @@ pub async fn run_listen(config: &Config) -> Result<()> {
 
     let session_key = Arc::new(derive_session_key(&code));
 
-    // Load config template for distribution
-    let config_path = crate::config::default_config_path();
-    let config_bytes = if config_path.exists() {
-        std::fs::read(&config_path).context("Failed to read config template")?
-    } else {
-        vec![]
-    };
-
     let state = ServerState {
         session_key: session_key.clone(),
         received: Arc::new(Mutex::new(ReceivedData::default())),
-        config_template: Arc::new(config_bytes),
     };
 
     let app = Router::new()
         .route("/passphrase", post(handle_post_passphrase))
         .route("/keyfile", post(handle_post_keyfile))
-        .route("/config", get(handle_get_config))
         .with_state(state.clone());
 
     // Bind to a random port
@@ -265,13 +254,6 @@ async fn handle_post_keyfile(
     }
 }
 
-async fn handle_get_config(State(state): State<ServerState>) -> impl IntoResponse {
-    match encrypt(&state.session_key, &state.config_template) {
-        Ok(encrypted) => (StatusCode::OK, encrypted),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, vec![]),
-    }
-}
-
 // ────────────────────────────────────────────────────────────────
 // `omega-backup config sync` (client machine)
 // ────────────────────────────────────────────────────────────────
@@ -345,26 +327,6 @@ pub async fn run_sync(config: &Config, client_name: &str, host: Option<&str>) ->
             anyhow::bail!("Server rejected keyfile: {}", resp.status());
         }
         println!("Sent keyfile to management machine.");
-    }
-
-    // Receive config template
-    let resp = http
-        .get(format!("{base_url}/config"))
-        .send()
-        .await
-        .context("Failed to fetch config template")?;
-    if resp.status().is_success() {
-        let encrypted_config = resp.bytes().await.context("Failed to read config response")?;
-        let config_bytes = decrypt(&session_key, &encrypted_config)?;
-        if !config_bytes.is_empty() {
-            let config_path = crate::config::default_config_path();
-            if let Some(parent) = config_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&config_path, &config_bytes)
-                .context("Failed to write received config")?;
-            println!("Received and saved config template → {}", config_path.display());
-        }
     }
 
     println!("\nSync complete.");

@@ -57,6 +57,10 @@ impl SshConfig {
             "BatchMode=yes".to_string(),
             "-o".to_string(),
             "StrictHostKeyChecking=accept-new".to_string(),
+            "-o".to_string(),
+            "ServerAliveInterval=10".to_string(),
+            "-o".to_string(),
+            "ServerAliveCountMax=3".to_string(),
             "-p".to_string(),
             self.port.to_string(),
         ];

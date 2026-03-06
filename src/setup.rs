@@ -274,7 +274,7 @@ fn print_client_instructions(
     println!("{}", "=".repeat(60));
     println!("  1. omega-backup init {name}           # create repo, export key");
     println!("  2. omega-backup config push-key {name}  # push key to GitHub (optional)");
-    println!("  3. omega-backup config sync           # sync key+passphrase with management");
+    println!("  3. omega-backup config sync           # send your key+passphrase to management");
 }
 
 // ────────────────────────────────────────────────────────────────
