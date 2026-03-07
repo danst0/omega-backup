@@ -98,7 +98,7 @@ impl BorgContext {
             let key_path = crate::config::expand_tilde(key);
             env.insert(
                 "BORG_RSH".to_string(),
-                format!("ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=10 -o ServerAliveCountMax=3", key_path.display()),
+                format!("ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o Compression=no -o Ciphers=aes128-gcm@openssh.com,chacha20-poly1305@openssh.com", key_path.display()),
             );
         }
 
