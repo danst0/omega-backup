@@ -74,6 +74,8 @@ pub struct RepoConfig {
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
     #[serde(default)]
+    pub exclude_if_present: Vec<String>,
+    #[serde(default)]
     pub optional: bool,
 }
 

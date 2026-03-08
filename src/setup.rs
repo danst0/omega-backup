@@ -173,6 +173,7 @@ async fn run_client_wizard() -> Result<()> {
         sources,
         compression: "auto,zstd".to_string(),
         exclude_patterns: vec!["sh:/home/*/.cache".to_string()],
+        exclude_if_present: vec![],
         optional: false,
     };
 
@@ -184,6 +185,7 @@ async fn run_client_wizard() -> Result<()> {
             sources: offsite_sources,
             compression: "auto,zstd".to_string(),
             exclude_patterns: vec![],
+            exclude_if_present: vec![],
             optional: true,
         })
     } else {
@@ -367,6 +369,7 @@ async fn run_management_wizard() -> Result<()> {
             sources: vec![],
             compression: "auto,zstd".to_string(),
             exclude_patterns: vec![],
+            exclude_if_present: vec![],
             optional: false,
         };
 
@@ -377,6 +380,7 @@ async fn run_management_wizard() -> Result<()> {
             sources: vec![],
             compression: "auto,zstd".to_string(),
             exclude_patterns: vec![],
+            exclude_if_present: vec![],
             optional: true,
         });
 

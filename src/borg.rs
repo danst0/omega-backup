@@ -303,6 +303,7 @@ pub async fn create(
     sources: &[String],
     compression: &str,
     excludes: &[String],
+    exclude_if_present: &[String],
 ) -> Result<BorgCreateResult> {
     let name = archive_name(hostname);
     let archive_ref = format!("{}::{}", ctx.repo, name);
@@ -330,6 +331,14 @@ pub async fn create(
     for pattern in excludes {
         args.push("--exclude".to_string());
         args.push(pattern.clone());
+    }
+
+    if !exclude_if_present.is_empty() {
+        args.push("--keep-exclude-tags".to_string());
+        for filename in exclude_if_present {
+            args.push("--exclude-if-present".to_string());
+            args.push(filename.clone());
+        }
     }
 
     args.push(archive_ref.clone());

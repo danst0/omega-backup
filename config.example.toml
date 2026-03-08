@@ -24,6 +24,7 @@ passphrase_file = "/root/.borg-keys/client1.pass"
 sources = ["/data", "/etc", "/home"]
 compression = "auto,zstd"
 exclude_patterns = ["sh:/home/*/.cache"]
+exclude_if_present = [".nobackup"]   # skip directories containing this file
 
 [clients.offsite_repo]
 path = "ssh://borguser@backupserver/mnt/offsite/repos/client1"
