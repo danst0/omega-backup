@@ -93,17 +93,21 @@ async fn init_client(config: &Config, client: &ClientConfig, dry_run: bool, verb
         .with_verbose(verbose);
 
     println!("  Initializing main repo: {}", client.main_repo.path);
-    borg::init(&ctx, "repokey-blake2")
-        .await
-        .with_context(|| format!("Failed to init main repo for {}", client.name))?;
-
-    // Export main key
-    let main_key_path = keys_dir.join(format!("{}-main.key", client.name));
-    if !dry_run {
-        println!("  Exporting main repo key → {}", main_key_path.display());
-        borg::export_key(&ctx, &main_key_path.display().to_string())
-            .await
-            .with_context(|| format!("Failed to export main key for {}", client.name))?;
+    match borg::init(&ctx, "repokey-blake2").await {
+        Ok(()) => {
+            // Export main key only for newly created repos
+            let main_key_path = keys_dir.join(format!("{}-main.key", client.name));
+            if !dry_run {
+                println!("  Exporting main repo key → {}", main_key_path.display());
+                borg::export_key(&ctx, &main_key_path.display().to_string())
+                    .await
+                    .with_context(|| format!("Failed to export main key for {}", client.name))?;
+            }
+        }
+        Err(e) if already_exists(&e) => {
+            println!("  Main repo already exists, skipping.");
+        }
+        Err(e) => return Err(e).context(format!("Failed to init main repo for {}", client.name)),
     }
 
     // Initialize offsite repo (if configured)
@@ -126,6 +130,9 @@ async fn init_client(config: &Config, client: &ClientConfig, dry_run: bool, verb
                         .with_context(|| format!("Failed to export offsite key for {}", client.name))?;
                 }
             }
+            Err(e) if already_exists(&e) => {
+                println!("  Offsite repo already exists, skipping.");
+            }
             Err(e) if offsite.optional => {
                 tracing::warn!("Offsite repo init failed (optional, continuing): {}", e);
             }
@@ -133,30 +140,10 @@ async fn init_client(config: &Config, client: &ClientConfig, dry_run: bool, verb
         }
     }
 
-    // Print instructions
-    print_post_init_instructions(client, &keys_dir);
-
     Ok(())
 }
 
-fn print_post_init_instructions(client: &ClientConfig, keys_dir: &std::path::Path) {
-    let main_key = keys_dir.join(format!("{}-main.key", client.name));
-
-    println!("\n  Key files:");
-    println!("    {}", main_key.display());
-
-    println!("\n  Next steps:");
-    println!(
-        "    # Copy passphrase to management machine (out-of-band):"
-    );
-    println!(
-        "    scp {} mgmt:/home/admin/.borg-keys/{}-main.pass",
-        client.main_repo.passphrase_file,
-        client.name
-    );
-    println!("\n    # Push key to GitHub (optional, disaster recovery):");
-    println!("    omega-backup config push-key {}", client.name);
-    println!("\n    # Or sync key+passphrase via mDNS (LAN):");
-    println!("    omega-backup config sync  # (management must be running `config listen`)");
-    println!("\n    IMPORTANT: Keep key files safe! Without them, backups cannot be restored.");
+/// Check if a borg error indicates the repository already exists.
+fn already_exists(err: &anyhow::Error) -> bool {
+    format!("{err}").contains("A repository already exists")
 }
