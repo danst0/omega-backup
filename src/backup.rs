@@ -13,6 +13,7 @@ use crate::{
 pub struct BackupArgs {
     pub dry_run: bool,
     pub verbose: bool,
+    pub only: Option<crate::BackupTarget>,
 }
 
 /// Run `omega-backup backup` — Mode 1: Client backup workflow.
@@ -74,42 +75,49 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
     let mut total_duration = 0.0f64;
     let mut total_dedup = 0u64;
 
-    // Step 4: borg create — main repo
-    let main_result = run_create(config, client, &client.main_repo, args).await;
-    match main_result {
-        Ok(result) => {
-            messages.push(format!(
-                "Main backup: OK ({:.1}s, dedup {} B)",
-                result.duration_secs, result.deduplicated_size
-            ));
-            total_duration += result.duration_secs;
-            total_dedup += result.deduplicated_size;
-            tracing::info!("Main backup complete: {}", result.archive_name);
-        }
-        Err(e) => {
-            overall_success = false;
-            messages.push(format!("Main backup FAILED: {e:#}"));
-            tracing::error!("Main backup failed: {}", e);
-        }
-    }
+    let run_main = !matches!(args.only, Some(crate::BackupTarget::Offsite));
+    let run_offsite = !matches!(args.only, Some(crate::BackupTarget::Main));
 
-    // Step 5: borg create — offsite repo (optional)
-    if let Some(ref offsite) = client.offsite_repo {
-        let offsite_result = run_create(config, client, offsite, args).await;
-        match offsite_result {
+    // Step 4: borg create — main repo
+    if run_main {
+        let main_result = run_create(config, client, &client.main_repo, args).await;
+        match main_result {
             Ok(result) => {
                 messages.push(format!(
-                    "Offsite backup: OK ({:.1}s, dedup {} B)",
+                    "Main backup: OK ({:.1}s, dedup {} B)",
                     result.duration_secs, result.deduplicated_size
                 ));
                 total_duration += result.duration_secs;
                 total_dedup += result.deduplicated_size;
-                tracing::info!("Offsite backup complete: {}", result.archive_name);
+                tracing::info!("Main backup complete: {}", result.archive_name);
             }
             Err(e) => {
-                // Offsite failures are warnings, not hard errors
-                messages.push(format!("Offsite backup FAILED (optional): {e:#}"));
-                tracing::warn!("Offsite backup failed: {}", e);
+                overall_success = false;
+                messages.push(format!("Main backup FAILED: {e:#}"));
+                tracing::error!("Main backup failed: {}", e);
+            }
+        }
+    }
+
+    // Step 5: borg create — offsite repo (optional)
+    if run_offsite {
+        if let Some(ref offsite) = client.offsite_repo {
+            let offsite_result = run_create(config, client, offsite, args).await;
+            match offsite_result {
+                Ok(result) => {
+                    messages.push(format!(
+                        "Offsite backup: OK ({:.1}s, dedup {} B)",
+                        result.duration_secs, result.deduplicated_size
+                    ));
+                    total_duration += result.duration_secs;
+                    total_dedup += result.deduplicated_size;
+                    tracing::info!("Offsite backup complete: {}", result.archive_name);
+                }
+                Err(e) => {
+                    // Offsite failures are warnings, not hard errors
+                    messages.push(format!("Offsite backup FAILED (optional): {e:#}"));
+                    tracing::warn!("Offsite backup failed: {}", e);
+                }
             }
         }
     }

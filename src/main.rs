@@ -14,7 +14,7 @@ mod check;
 mod update;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -63,7 +63,11 @@ enum Commands {
     },
 
     /// Run a backup (client mode)
-    Backup,
+    Backup {
+        /// Which repo to back up: main, offsite, or both (default)
+        #[arg(long, value_enum)]
+        only: Option<BackupTarget>,
+    },
 
     /// Run maintenance: prune, compact, check (management mode)
     Maintain {
@@ -115,6 +119,12 @@ enum Commands {
 
     /// Update omega-backup to the latest version from GitHub
     Update,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum BackupTarget {
+    Main,
+    Offsite,
 }
 
 #[derive(Debug, Subcommand)]
@@ -234,8 +244,8 @@ async fn run(cli: Cli) -> Result<()> {
             init::run_init(&config, client.as_deref(), dry_run, verbose).await?;
         }
 
-        Commands::Backup => {
-            let args = backup::BackupArgs { dry_run, verbose };
+        Commands::Backup { ref only } => {
+            let args = backup::BackupArgs { dry_run, verbose, only: only.clone() };
             backup::run_backup(&config, &args).await?;
         }
 
