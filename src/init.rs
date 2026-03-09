@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::{
     borg::{self, BorgContext},
-    config::{ClientConfig, Config},
+    config::{self, ClientConfig, Config},
     ssh::{self, SshConfig},
     wol,
 };
@@ -52,8 +52,38 @@ pub async fn run_init(config: &Config, client_filter: Option<&str>, dry_run: boo
     Ok(())
 }
 
+/// Ensure a passphrase file exists, generating a random one if needed.
+fn ensure_passphrase_file(passphrase_file: &str) -> Result<()> {
+    let path = config::expand_tilde(passphrase_file);
+    if path.exists() {
+        return Ok(());
+    }
+    // Create parent directory if needed
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+    // Generate 32 random bytes → 64-char hex string
+    use rand::Rng;
+    let bytes: [u8; 32] = rand::rng().random();
+    let passphrase = hex::encode(bytes);
+    std::fs::write(&path, &passphrase)
+        .with_context(|| format!("Failed to write passphrase file: {}", path.display()))?;
+    // Restrict permissions to owner only
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    println!("  Generated passphrase → {}", path.display());
+    Ok(())
+}
+
 async fn init_client(config: &Config, client: &ClientConfig, dry_run: bool, verbose: bool) -> Result<()> {
     let keys_dir = config.keys_local_dir();
+
+    // Ensure passphrase file exists (generate if needed)
+    ensure_passphrase_file(&client.main_repo.passphrase_file)?;
 
     // Initialize main repo
     let ctx = BorgContext::new(&client.main_repo.path, &client.main_repo.passphrase_file)
@@ -78,6 +108,7 @@ async fn init_client(config: &Config, client: &ClientConfig, dry_run: bool, verb
 
     // Initialize offsite repo (if configured)
     if let Some(ref offsite) = client.offsite_repo {
+        ensure_passphrase_file(&offsite.passphrase_file)?;
         let offsite_ctx = BorgContext::new(&offsite.path, &offsite.passphrase_file)
             .with_ssh_key(&offsite.ssh_key)
             .with_binary(&config.borg.binary)
