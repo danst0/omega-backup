@@ -90,6 +90,7 @@ pub async fn run_maintenance(config: &Config, args: &MaintenanceArgs) -> Result<
         let ncfg = NtfyConfig {
             url: &ntfy_cfg.url,
             token: ntfy_cfg.token.as_deref(),
+            topic: &ntfy_cfg.topic,
         };
         if let Err(e) = ntfy::send_notification(&ncfg, &summary).await {
             tracing::warn!("Failed to send ntfy notification: {}", e);

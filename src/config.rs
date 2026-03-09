@@ -61,6 +61,12 @@ impl Default for BorgConfig {
 pub struct NtfyConfig {
     pub url: String,
     pub token: Option<String>,
+    #[serde(default = "default_ntfy_topic")]
+    pub topic: String,
+}
+
+fn default_ntfy_topic() -> String {
+    "omega-backup".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -478,6 +484,7 @@ admin_user = "admin"
                 host: "backup.local".to_string(),
                 mac: "11:22:33:44:55:66".to_string(),
                 admin_user: "borgadmin".to_string(),
+                admin_ssh_key: None,
                 poll_interval_secs: 20,
                 poll_timeout_secs: 120,
             },
@@ -488,6 +495,7 @@ admin_user = "admin"
             ntfy: Some(NtfyConfig {
                 url: "https://ntfy.example.com/topic".to_string(),
                 token: Some("tk_test".to_string()),
+                topic: "omega-backup".to_string(),
             }),
             clients: vec![],
             keys: KeysConfig::default(),
@@ -499,6 +507,7 @@ admin_user = "admin"
                 keep_yearly: 1,
             },
             offsite_retention: None,
+            update: UpdateConfig::default(),
         };
 
         original.save(&path).unwrap();
@@ -549,6 +558,7 @@ admin_user = "admin"
                 host: "s".to_string(),
                 mac: "AA:BB:CC:DD:EE:FF".to_string(),
                 admin_user: "a".to_string(),
+                admin_ssh_key: None,
                 poll_interval_secs: 15,
                 poll_timeout_secs: 300,
             },
@@ -572,6 +582,7 @@ admin_user = "admin"
             distribution: DistributionConfig::default(),
             retention: RetentionConfig::default(),
             offsite_retention: None,
+            update: UpdateConfig::default(),
         };
 
         assert_eq!(cfg.find_client("alpha").unwrap().name, "alpha");
@@ -587,6 +598,7 @@ admin_user = "admin"
             sources: vec!["/data".to_string()],
             compression: "auto,zstd".to_string(),
             exclude_patterns: vec![],
+            exclude_if_present: vec![],
             optional: false,
         }
     }

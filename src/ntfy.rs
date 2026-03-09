@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
+use serde_json::json;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -22,6 +23,7 @@ pub struct NotificationSummary {
 pub struct NtfyConfig<'a> {
     pub url: &'a str,
     pub token: Option<&'a str>,
+    pub topic: &'a str,
 }
 
 /// Send a backup notification to ntfy.
@@ -34,9 +36,12 @@ pub async fn send_notification(cfg: &NtfyConfig<'_>, summary: &NotificationSumma
         format!("Backup FAILED: {}", summary.client_name)
     };
 
-    // Priority 5 = urgent for errors, 3 = default for success
-    let priority = if summary.success { "3" } else { "5" };
-    let tags = if summary.success { "white_check_mark" } else { "x,sos" };
+    let priority: u8 = if summary.success { 3 } else { 5 };
+    let tags = if summary.success {
+        vec!["white_check_mark"]
+    } else {
+        vec!["x", "sos"]
+    };
 
     let mut body = summary.message.clone();
     if let Some(duration) = summary.duration_secs {
@@ -46,12 +51,18 @@ pub async fn send_notification(cfg: &NtfyConfig<'_>, summary: &NotificationSumma
         body.push_str(&format!("\nDeduplicated: {} bytes", dedup));
     }
 
+    let json_body = json!({
+        "topic": cfg.topic,
+        "title": title,
+        "message": body,
+        "priority": priority,
+        "tags": tags,
+    });
+
     let mut req = client
         .post(cfg.url)
-        .header("Title", &title)
-        .header("Priority", priority)
-        .header("Tags", tags)
-        .body(body);
+        .header("Content-Type", "application/json")
+        .body(json_body.to_string());
 
     if let Some(token) = cfg.token {
         req = req.header("Authorization", format!("Bearer {token}"));
@@ -77,17 +88,23 @@ pub async fn send_notification(cfg: &NtfyConfig<'_>, summary: &NotificationSumma
 }
 
 /// Send a simple text notification.
-pub async fn send_simple(url: &str, token: Option<&str>, title: &str, message: &str, urgent: bool) -> Result<()> {
+pub async fn send_simple(cfg: &NtfyConfig<'_>, title: &str, message: &str, urgent: bool) -> Result<()> {
     let client = Client::new();
-    let priority = if urgent { "5" } else { "3" };
+    let priority: u8 = if urgent { 5 } else { 3 };
+
+    let json_body = json!({
+        "topic": cfg.topic,
+        "title": title,
+        "message": message,
+        "priority": priority,
+    });
 
     let mut req = client
-        .post(url)
-        .header("Title", title)
-        .header("Priority", priority)
-        .body(message.to_string());
+        .post(cfg.url)
+        .header("Content-Type", "application/json")
+        .body(json_body.to_string());
 
-    if let Some(token) = token {
+    if let Some(token) = cfg.token {
         req = req.header("Authorization", format!("Bearer {token}"));
     }
 

@@ -89,6 +89,16 @@ async fn run_client_wizard() -> Result<()> {
         None
     };
 
+    let ntfy_topic: String = if !ntfy_url.is_empty() {
+        Input::new()
+            .with_prompt("ntfy topic")
+            .default("omega-backup".to_string())
+            .interact_text()
+            .context("Input failed")?
+    } else {
+        String::new()
+    };
+
     let github_repo: String = Input::new()
         .with_prompt("GitHub repo URL for key backup (leave empty to skip)")
         .allow_empty(true)
@@ -202,7 +212,7 @@ async fn run_client_wizard() -> Result<()> {
     let ntfy = if ntfy_url.is_empty() {
         None
     } else {
-        Some(NtfyConfig { url: ntfy_url, token: ntfy_token })
+        Some(NtfyConfig { url: ntfy_url, token: ntfy_token, topic: ntfy_topic })
     };
 
     let config = Config {
@@ -314,6 +324,16 @@ async fn run_management_wizard() -> Result<()> {
         if tok.is_empty() { None } else { Some(tok) }
     } else {
         None
+    };
+
+    let ntfy_topic: String = if !ntfy_url.is_empty() {
+        Input::new()
+            .with_prompt("ntfy topic")
+            .default("omega-backup".to_string())
+            .interact_text()
+            .context("Input failed")?
+    } else {
+        String::new()
     };
 
     let github_repo: String = Input::new()
@@ -428,7 +448,7 @@ async fn run_management_wizard() -> Result<()> {
     let ntfy = if ntfy_url.is_empty() {
         None
     } else {
-        Some(NtfyConfig { url: ntfy_url, token: ntfy_token })
+        Some(NtfyConfig { url: ntfy_url, token: ntfy_token, topic: ntfy_topic })
     };
 
     // Use a dummy server config for management (server fields still needed)

@@ -24,6 +24,21 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
     // Assume this machine is the first (and only) client in its own config
     let client = &config.clients[0];
 
+    if client.hostname.is_empty() {
+        anyhow::bail!(
+            "Client '{}' has an empty hostname. This looks like a management config — \
+             run `omega-backup config` on the client machine to generate a proper client config.",
+            client.name
+        );
+    }
+    if client.main_repo.sources.is_empty() {
+        anyhow::bail!(
+            "Client '{}' has no backup sources configured. \
+             Add sources to [clients.main_repo] in config.toml.",
+            client.name
+        );
+    }
+
     println!("Starting backup for client: {}", client.name);
 
     // Step 1: Wake-on-LAN
@@ -73,7 +88,7 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
         }
         Err(e) => {
             overall_success = false;
-            messages.push(format!("Main backup FAILED: {e}"));
+            messages.push(format!("Main backup FAILED: {e:#}"));
             tracing::error!("Main backup failed: {}", e);
         }
     }
@@ -93,7 +108,7 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
             }
             Err(e) => {
                 // Offsite failures are warnings, not hard errors
-                messages.push(format!("Offsite backup FAILED (optional): {e}"));
+                messages.push(format!("Offsite backup FAILED (optional): {e:#}"));
                 tracing::warn!("Offsite backup failed: {}", e);
             }
         }
@@ -132,6 +147,7 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
         let ncfg = NtfyConfig {
             url: &ntfy_cfg.url,
             token: ntfy_cfg.token.as_deref(),
+            topic: &ntfy_cfg.topic,
         };
         if let Err(e) = ntfy::send_notification(&ncfg, &summary).await {
             tracing::warn!("Failed to send ntfy notification: {}", e);
