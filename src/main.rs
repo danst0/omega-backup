@@ -4,6 +4,7 @@ mod config;
 mod distribute;
 mod init;
 mod maintenance;
+mod reset;
 mod ntfy;
 mod restore;
 mod setup;
@@ -116,6 +117,18 @@ enum Commands {
 
     /// Validate configuration and connectivity
     CheckConfig,
+
+    /// Delete and reinitialize borg repositories for a client
+    Reset {
+        /// Client name to reset
+        client: String,
+        /// Which repo to reset: main, offsite, or both (default)
+        #[arg(long, value_enum)]
+        only: Option<BackupTarget>,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
 
     /// Update omega-backup to the latest version from GitHub
     Update,
@@ -276,6 +289,11 @@ async fn run(cli: Cli) -> Result<()> {
 
         Commands::CheckConfig => {
             check::run_check(&config).await?;
+        }
+
+        Commands::Reset { ref client, ref only, yes } => {
+            let args = reset::ResetArgs { dry_run, verbose, only: only.clone(), yes };
+            reset::run_reset(&config, client, &args).await?;
         }
 
         Commands::Update => {
