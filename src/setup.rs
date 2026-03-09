@@ -392,6 +392,27 @@ async fn run_management_wizard() -> Result<()> {
         });
     }
 
+    // Generate passphrase for the local host's client entry (if any)
+    let local_hostname = get_hostname().await.unwrap_or_default();
+    if !local_hostname.is_empty() {
+        if let Some(local_client) = clients.iter().find(|c| c.name == local_hostname) {
+            let keys_dir = expand_tilde("~/.borg-keys");
+            std::fs::create_dir_all(&keys_dir).context("Failed to create ~/.borg-keys")?;
+            set_dir_permissions(&keys_dir, 0o700);
+
+            let pass_path = expand_tilde(&local_client.main_repo.passphrase_file);
+            if !pass_path.exists() {
+                let passphrase = generate_passphrase();
+                std::fs::write(&pass_path, &passphrase)
+                    .with_context(|| format!("Failed to write passphrase: {}", pass_path.display()))?;
+                set_file_permissions(&pass_path, 0o600);
+                println!("Generated passphrase for local host → {}", pass_path.display());
+            } else {
+                println!("Passphrase already exists for local host: {}", pass_path.display());
+            }
+        }
+    }
+
     // Generate SSH keys
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
     let ssh_dir = home.join(".ssh");

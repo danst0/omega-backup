@@ -52,8 +52,25 @@ pub async fn run_init(config: &Config, client_filter: Option<&str>, dry_run: boo
     Ok(())
 }
 
-/// Ensure a passphrase file exists, generating a random one if needed.
-fn ensure_passphrase_file(passphrase_file: &str) -> Result<()> {
+/// Verify that a passphrase file exists for a main repo.
+/// Main repo passphrases must be created beforehand — either by the client wizard
+/// (`omega-backup config`) or received via `omega-backup config sync`.
+fn require_passphrase_file(passphrase_file: &str, client_name: &str) -> Result<()> {
+    let path = config::expand_tilde(passphrase_file);
+    if path.exists() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Passphrase file not found: {}\n\
+         Run 'omega-backup config sync' on {client_name} first, \
+         or 'omega-backup config' if this is the management host.",
+        path.display()
+    );
+}
+
+/// Ensure a passphrase file exists for an offsite repo, generating one if needed.
+/// Offsite repos are managed exclusively by the management host, so auto-generation is safe.
+fn ensure_offsite_passphrase_file(passphrase_file: &str) -> Result<()> {
     let path = config::expand_tilde(passphrase_file);
     if path.exists() {
         return Ok(());
@@ -75,15 +92,15 @@ fn ensure_passphrase_file(passphrase_file: &str) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
-    println!("  Generated passphrase → {}", path.display());
+    println!("  Generated offsite passphrase → {}", path.display());
     Ok(())
 }
 
 async fn init_client(config: &Config, client: &ClientConfig, dry_run: bool, verbose: bool) -> Result<()> {
     let keys_dir = config.keys_local_dir();
 
-    // Ensure passphrase file exists (generate if needed)
-    ensure_passphrase_file(&client.main_repo.passphrase_file)?;
+    // Verify passphrase file exists (must be created by wizard or config sync)
+    require_passphrase_file(&client.main_repo.passphrase_file, &client.name)?;
 
     // Initialize main repo
     let ctx = BorgContext::new(&client.main_repo.path, &client.main_repo.passphrase_file)
@@ -112,7 +129,7 @@ async fn init_client(config: &Config, client: &ClientConfig, dry_run: bool, verb
 
     // Initialize offsite repo (if configured)
     if let Some(ref offsite) = client.offsite_repo {
-        ensure_passphrase_file(&offsite.passphrase_file)?;
+        ensure_offsite_passphrase_file(&offsite.passphrase_file)?;
         let offsite_ctx = BorgContext::new(&offsite.path, &offsite.passphrase_file)
             .with_ssh_key(&offsite.ssh_key)
             .with_binary(&config.borg.binary)
