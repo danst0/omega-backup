@@ -69,8 +69,9 @@ fn default_ntfy_topic() -> String {
     "omega-backup".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RepoConfig {
+    pub name: String,
     pub path: String,
     pub ssh_key: String,
     pub passphrase_file: String,
@@ -83,18 +84,137 @@ pub struct RepoConfig {
     pub exclude_if_present: Vec<String>,
     #[serde(default)]
     pub optional: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<RetentionConfig>,
+}
+
+// Manual Deserialize for RepoConfig to handle missing `name` field (backward compat)
+impl<'de> Deserialize<'de> for RepoConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RepoConfigHelper {
+            #[serde(default)]
+            name: Option<String>,
+            path: String,
+            ssh_key: String,
+            passphrase_file: String,
+            #[serde(default)]
+            sources: Vec<String>,
+            #[serde(default = "default_compression")]
+            compression: String,
+            #[serde(default)]
+            exclude_patterns: Vec<String>,
+            #[serde(default)]
+            exclude_if_present: Vec<String>,
+            #[serde(default)]
+            optional: bool,
+            #[serde(default)]
+            retention: Option<RetentionConfig>,
+        }
+        let helper = RepoConfigHelper::deserialize(deserializer)?;
+        Ok(RepoConfig {
+            name: helper.name.unwrap_or_default(),
+            path: helper.path,
+            ssh_key: helper.ssh_key,
+            passphrase_file: helper.passphrase_file,
+            sources: helper.sources,
+            compression: helper.compression,
+            exclude_patterns: helper.exclude_patterns,
+            exclude_if_present: helper.exclude_if_present,
+            optional: helper.optional,
+            retention: helper.retention,
+        })
+    }
 }
 
 fn default_compression() -> String {
     "auto,zstd".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ClientConfig {
     pub name: String,
     pub hostname: String,
-    pub main_repo: RepoConfig,
-    pub offsite_repo: Option<RepoConfig>,
+    pub repos: Vec<RepoConfig>,
+}
+
+impl ClientConfig {
+    /// Find the main repo (name == "main").
+    pub fn main_repo(&self) -> Option<&RepoConfig> {
+        self.repos.iter().find(|r| r.name == "main")
+    }
+
+    /// Find a repo by name.
+    pub fn find_repo(&self, name: &str) -> Option<&RepoConfig> {
+        self.repos.iter().find(|r| r.name == name)
+    }
+
+    /// Iterate over all non-main repos.
+    pub fn non_main_repos(&self) -> impl Iterator<Item = &RepoConfig> {
+        self.repos.iter().filter(|r| r.name != "main")
+    }
+}
+
+// Custom deserializer for backward compatibility: accepts both old format
+// (main_repo + offsite_repo) and new format (repos array).
+impl<'de> Deserialize<'de> for ClientConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct NewFormat {
+            name: String,
+            hostname: String,
+            repos: Vec<RepoConfig>,
+        }
+
+        #[derive(Deserialize)]
+        struct OldFormat {
+            name: String,
+            hostname: String,
+            main_repo: RepoConfig,
+            offsite_repo: Option<RepoConfig>,
+        }
+
+        let value = toml::Value::deserialize(deserializer)?;
+
+        // Try new format first (has "repos" key)
+        if value.get("repos").is_some() {
+            let new: NewFormat = value
+                .try_into()
+                .map_err(serde::de::Error::custom)?;
+            return Ok(ClientConfig {
+                name: new.name,
+                hostname: new.hostname,
+                repos: new.repos,
+            });
+        }
+
+        // Fall back to old format (has "main_repo" key)
+        let old: OldFormat = value
+            .try_into()
+            .map_err(serde::de::Error::custom)?;
+
+        let mut repos = vec![];
+        let mut main = old.main_repo;
+        main.name = "main".to_string();
+        repos.push(main);
+
+        if let Some(mut offsite) = old.offsite_repo {
+            offsite.name = "offsite".to_string();
+            repos.push(offsite);
+        }
+
+        Ok(ClientConfig {
+            name: old.name,
+            hostname: old.hostname,
+            repos,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -194,7 +314,9 @@ pub struct Config {
     pub distribution: DistributionConfig,
     #[serde(default)]
     pub retention: RetentionConfig,
-    pub offsite_retention: Option<RetentionConfig>,
+    /// Deprecated: use per-repo retention overrides instead. Still accepted for backward compat.
+    #[serde(default, skip_serializing)]
+    offsite_retention: Option<RetentionConfig>,
     #[serde(default)]
     pub update: UpdateConfig,
 }
@@ -525,6 +647,41 @@ admin_user = "admin"
         assert_eq!(ntfy.token.as_deref(), Some("tk_test"));
     }
 
+    #[test]
+    fn test_config_load_old_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, r#"
+[server]
+host = "myserver"
+mac = "AA:BB:CC:DD:EE:FF"
+admin_user = "admin"
+
+[[clients]]
+name = "alpha"
+hostname = "alpha.local"
+
+[clients.main_repo]
+path = "ssh://user@host/repo"
+ssh_key = "/tmp/key"
+passphrase_file = "/tmp/pass"
+sources = ["/data"]
+
+[clients.offsite_repo]
+path = "ssh://user@host/offsite"
+ssh_key = "/tmp/key2"
+passphrase_file = "/tmp/pass2"
+sources = ["/data"]
+optional = true
+"#).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let client = cfg.find_client("alpha").unwrap();
+        assert_eq!(client.repos.len(), 2);
+        assert_eq!(client.main_repo().unwrap().path, "ssh://user@host/repo");
+        assert_eq!(client.find_repo("offsite").unwrap().path, "ssh://user@host/offsite");
+        assert!(client.find_repo("offsite").unwrap().optional);
+    }
+
     // ── AppState serialisation ───────────────────────────────────
 
     #[test]
@@ -568,14 +725,12 @@ admin_user = "admin"
                 ClientConfig {
                     name: "alpha".to_string(),
                     hostname: "alpha.local".to_string(),
-                    main_repo: dummy_repo(),
-                    offsite_repo: None,
+                    repos: vec![dummy_repo("main")],
                 },
                 ClientConfig {
                     name: "beta".to_string(),
                     hostname: "beta.local".to_string(),
-                    main_repo: dummy_repo(),
-                    offsite_repo: None,
+                    repos: vec![dummy_repo("main")],
                 },
             ],
             keys: KeysConfig::default(),
@@ -590,8 +745,9 @@ admin_user = "admin"
         assert!(cfg.find_client("gamma").is_none());
     }
 
-    fn dummy_repo() -> RepoConfig {
+    fn dummy_repo(name: &str) -> RepoConfig {
         RepoConfig {
+            name: name.to_string(),
             path: "ssh://user@host/repo".to_string(),
             ssh_key: "/tmp/key".to_string(),
             passphrase_file: "/tmp/pass".to_string(),
@@ -600,6 +756,7 @@ admin_user = "admin"
             exclude_patterns: vec![],
             exclude_if_present: vec![],
             optional: false,
+            retention: None,
         }
     }
 }

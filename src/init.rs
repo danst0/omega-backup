@@ -68,9 +68,9 @@ fn require_passphrase_file(passphrase_file: &str, client_name: &str) -> Result<(
     );
 }
 
-/// Ensure a passphrase file exists for an offsite repo, generating one if needed.
-/// Offsite repos are managed exclusively by the management host, so auto-generation is safe.
-fn ensure_offsite_passphrase_file(passphrase_file: &str) -> Result<()> {
+/// Ensure a passphrase file exists for a non-main repo, generating one if needed.
+/// Non-main repos are managed exclusively by the management host, so auto-generation is safe.
+fn ensure_passphrase_file(passphrase_file: &str) -> Result<()> {
     let path = config::expand_tilde(passphrase_file);
     if path.exists() {
         return Ok(());
@@ -92,68 +92,46 @@ fn ensure_offsite_passphrase_file(passphrase_file: &str) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
-    println!("  Generated offsite passphrase → {}", path.display());
+    println!("  Generated passphrase → {}", path.display());
     Ok(())
 }
 
 async fn init_client(config: &Config, client: &ClientConfig, dry_run: bool, verbose: bool) -> Result<()> {
     let keys_dir = config.keys_local_dir();
 
-    // Verify passphrase file exists (must be created by wizard or config sync)
-    require_passphrase_file(&client.main_repo.passphrase_file, &client.name)?;
-
-    // Initialize main repo
-    let ctx = BorgContext::new(&client.main_repo.path, &client.main_repo.passphrase_file)
-        .with_ssh_key(&client.main_repo.ssh_key)
-        .with_binary(&config.borg.binary)
-        .with_dry_run(dry_run)
-        .with_verbose(verbose);
-
-    println!("  Initializing main repo: {}", client.main_repo.path);
-    match borg::init(&ctx, "repokey-blake2").await {
-        Ok(()) => {
-            // Export main key only for newly created repos
-            let main_key_path = keys_dir.join(format!("{}-main.key", client.name));
-            if !dry_run {
-                println!("  Exporting main repo key → {}", main_key_path.display());
-                borg::export_key(&ctx, &main_key_path.display().to_string())
-                    .await
-                    .with_context(|| format!("Failed to export main key for {}", client.name))?;
-            }
+    for repo in &client.repos {
+        if repo.name == "main" {
+            // Main repo passphrase must already exist
+            require_passphrase_file(&repo.passphrase_file, &client.name)?;
+        } else {
+            // Non-main repos: auto-generate passphrase if missing
+            ensure_passphrase_file(&repo.passphrase_file)?;
         }
-        Err(e) if already_exists(&e) => {
-            println!("  Main repo already exists, skipping.");
-        }
-        Err(e) => return Err(e).context(format!("Failed to init main repo for {}", client.name)),
-    }
 
-    // Initialize offsite repo (if configured)
-    if let Some(ref offsite) = client.offsite_repo {
-        ensure_offsite_passphrase_file(&offsite.passphrase_file)?;
-        let offsite_ctx = BorgContext::new(&offsite.path, &offsite.passphrase_file)
-            .with_ssh_key(&offsite.ssh_key)
+        let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
+            .with_ssh_key(&repo.ssh_key)
             .with_binary(&config.borg.binary)
             .with_dry_run(dry_run)
             .with_verbose(verbose);
 
-        println!("  Initializing offsite repo: {}", offsite.path);
-        match borg::init(&offsite_ctx, "repokey-blake2").await {
+        println!("  Initializing {} repo: {}", repo.name, repo.path);
+        match borg::init(&ctx, "repokey-blake2").await {
             Ok(()) => {
-                let offsite_key_path = keys_dir.join(format!("{}-offsite.key", client.name));
+                let key_path = keys_dir.join(format!("{}-{}.key", client.name, repo.name));
                 if !dry_run {
-                    println!("  Exporting offsite repo key → {}", offsite_key_path.display());
-                    borg::export_key(&offsite_ctx, &offsite_key_path.display().to_string())
+                    println!("  Exporting {} repo key → {}", repo.name, key_path.display());
+                    borg::export_key(&ctx, &key_path.display().to_string())
                         .await
-                        .with_context(|| format!("Failed to export offsite key for {}", client.name))?;
+                        .with_context(|| format!("Failed to export key for {}/{}", client.name, repo.name))?;
                 }
             }
             Err(e) if already_exists(&e) => {
-                println!("  Offsite repo already exists, skipping.");
+                println!("  {} repo already exists, skipping.", repo.name);
             }
-            Err(e) if offsite.optional => {
-                tracing::warn!("Offsite repo init failed (optional, continuing): {}", e);
+            Err(e) if repo.optional => {
+                tracing::warn!("{} repo init failed (optional, continuing): {}", repo.name, e);
             }
-            Err(e) => return Err(e).context("Offsite repo init failed"),
+            Err(e) => return Err(e).context(format!("Failed to init {} repo for {}", repo.name, client.name)),
         }
     }
 

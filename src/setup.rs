@@ -18,6 +18,41 @@ enum Role {
 pub async fn run_wizard() -> Result<()> {
     println!("\nomega-backup — Interactive Setup Wizard\n");
 
+    // Check if config already exists
+    let config_path = default_config_path();
+    if config_path.exists() {
+        return run_existing_config_menu(&config_path).await;
+    }
+
+    run_fresh_wizard().await
+}
+
+/// Menu shown when a config already exists.
+async fn run_existing_config_menu(config_path: &std::path::Path) -> Result<()> {
+    println!("Existing config found: {}\n", config_path.display());
+
+    let items = vec![
+        "Add a repo to an existing client",
+        "Edit an existing client",
+        "Start fresh (overwrites current config)",
+    ];
+    let choice = Select::new()
+        .with_prompt("What would you like to do?")
+        .items(&items)
+        .default(0)
+        .interact()
+        .context("Selection failed")?;
+
+    match choice {
+        0 => run_add_repo_wizard(config_path).await,
+        1 => run_edit_client_wizard(config_path).await,
+        2 => run_fresh_wizard().await,
+        _ => unreachable!(),
+    }
+}
+
+/// Fresh setup wizard (no existing config).
+async fn run_fresh_wizard() -> Result<()> {
     let role_items = vec!["client (runs backups)", "management (runs maintenance)"];
     let role_idx = Select::new()
         .with_prompt("What role does this machine have?")
@@ -36,6 +71,170 @@ pub async fn run_wizard() -> Result<()> {
         Role::Client => run_client_wizard().await,
         Role::Management => run_management_wizard().await,
     }
+}
+
+// ────────────────────────────────────────────────────────────────
+// Add repo wizard
+// ────────────────────────────────────────────────────────────────
+
+async fn run_add_repo_wizard(config_path: &std::path::Path) -> Result<()> {
+    let mut config = Config::load(config_path)?;
+
+    if config.clients.is_empty() {
+        anyhow::bail!("No clients configured. Run fresh setup first.");
+    }
+
+    let client_names: Vec<&str> = config.clients.iter().map(|c| c.name.as_str()).collect();
+    let client_idx = Select::new()
+        .with_prompt("Which client?")
+        .items(&client_names)
+        .default(0)
+        .interact()
+        .context("Selection failed")?;
+
+    let client = &mut config.clients[client_idx];
+    let client_name = client.name.clone();
+
+    println!("\nAdding a new repo to client '{}'", client_name);
+    println!("Existing repos: {}", client.repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", "));
+
+    let repo_name: String = Input::new()
+        .with_prompt("New repo name (e.g. offsite, nas)")
+        .interact_text()
+        .context("Input failed")?;
+
+    if client.find_repo(&repo_name).is_some() {
+        anyhow::bail!("Repo '{}' already exists for client '{}'", repo_name, client_name);
+    }
+
+    let server_host = &config.server.host;
+    let repo_path: String = Input::new()
+        .with_prompt("Repo path (SSH URL)")
+        .default(format!("ssh://borguser@{}/mnt/{}/repos/{}", server_host, repo_name, client_name))
+        .interact_text()
+        .context("Input failed")?;
+
+    let sources_input: String = Input::new()
+        .with_prompt("Backup sources (space-separated, empty to inherit from main)")
+        .allow_empty(true)
+        .interact_text()
+        .context("Input failed")?;
+    let sources: Vec<String> = if sources_input.is_empty() {
+        client.main_repo().map(|r| r.sources.clone()).unwrap_or_default()
+    } else {
+        sources_input.split_whitespace().map(|s| s.to_string()).collect()
+    };
+
+    let optional = Confirm::new()
+        .with_prompt("Mark as optional (failures are warnings)?")
+        .default(true)
+        .interact()
+        .context("Confirm failed")?;
+
+    // Generate SSH key
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+    let ssh_dir = home.join(".ssh");
+    std::fs::create_dir_all(&ssh_dir).context("Failed to create ~/.ssh")?;
+
+    let ssh_key_path = ssh_dir.join(format!("borg_{}_{}_ed25519", client_name, repo_name));
+    generate_ssh_key(&ssh_key_path, &format!("borg-{}-{}", client_name, repo_name)).await?;
+
+    // Generate passphrase
+    let keys_dir = expand_tilde("~/.borg-keys");
+    std::fs::create_dir_all(&keys_dir).context("Failed to create ~/.borg-keys")?;
+    set_dir_permissions(&keys_dir, 0o700);
+
+    let pass_path = keys_dir.join(format!("{}-{}.pass", client_name, repo_name));
+    if !pass_path.exists() {
+        let passphrase = generate_passphrase();
+        std::fs::write(&pass_path, &passphrase)
+            .context("Failed to write passphrase")?;
+        set_file_permissions(&pass_path, 0o600);
+        println!("Generated passphrase → {}", pass_path.display());
+    }
+
+    let new_repo = RepoConfig {
+        name: repo_name.clone(),
+        path: repo_path,
+        ssh_key: ssh_key_path.display().to_string(),
+        passphrase_file: pass_path.display().to_string(),
+        sources,
+        compression: "auto,zstd".to_string(),
+        exclude_patterns: vec![],
+        exclude_if_present: vec![],
+        optional,
+        retention: None,
+    };
+
+    client.repos.push(new_repo);
+    config.save(config_path)?;
+    println!("\nConfig updated: {}", config_path.display());
+    println!("Added repo '{}' to client '{}'.", repo_name, client_name);
+    println!("\nNext: run `omega-backup init {}` to initialize the new repo.", client_name);
+
+    Ok(())
+}
+
+// ────────────────────────────────────────────────────────────────
+// Edit client wizard
+// ────────────────────────────────────────────────────────────────
+
+async fn run_edit_client_wizard(config_path: &std::path::Path) -> Result<()> {
+    let mut config = Config::load(config_path)?;
+
+    if config.clients.is_empty() {
+        anyhow::bail!("No clients configured.");
+    }
+
+    let client_names: Vec<&str> = config.clients.iter().map(|c| c.name.as_str()).collect();
+    let client_idx = Select::new()
+        .with_prompt("Which client to edit?")
+        .items(&client_names)
+        .default(0)
+        .interact()
+        .context("Selection failed")?;
+
+    let client = &mut config.clients[client_idx];
+
+    println!("\nEditing client '{}' (hostname: {})", client.name, client.hostname);
+
+    let new_hostname: String = Input::new()
+        .with_prompt("Hostname")
+        .default(client.hostname.clone())
+        .interact_text()
+        .context("Input failed")?;
+    client.hostname = new_hostname;
+
+    // Edit each repo's sources and exclude patterns
+    for repo in &mut client.repos {
+        println!("\n  --- Repo: {} ---", repo.name);
+
+        let sources_str = repo.sources.join(" ");
+        let new_sources: String = Input::new()
+            .with_prompt(format!("  Sources for {}", repo.name))
+            .default(sources_str)
+            .interact_text()
+            .context("Input failed")?;
+        repo.sources = new_sources.split_whitespace().map(|s| s.to_string()).collect();
+
+        let excludes_str = repo.exclude_patterns.join(" ");
+        let new_excludes: String = Input::new()
+            .with_prompt(format!("  Exclude patterns for {}", repo.name))
+            .default(excludes_str)
+            .allow_empty(true)
+            .interact_text()
+            .context("Input failed")?;
+        repo.exclude_patterns = if new_excludes.is_empty() {
+            vec![]
+        } else {
+            new_excludes.split_whitespace().map(|s| s.to_string()).collect()
+        };
+    }
+
+    config.save(config_path)?;
+    println!("\nConfig updated: {}", config_path.display());
+
+    Ok(())
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -174,9 +373,10 @@ async fn run_client_wizard() -> Result<()> {
         None
     };
 
-    // Build config
+    // Build repos
     let server_base = format!("ssh://borguser@{server_host}");
-    let main_repo = RepoConfig {
+    let mut repos = vec![RepoConfig {
+        name: "main".to_string(),
         path: format!("{server_base}/backup/repos/{client_name}"),
         ssh_key: borg_main_key.display().to_string(),
         passphrase_file: pass_main_path.display().to_string(),
@@ -185,10 +385,12 @@ async fn run_client_wizard() -> Result<()> {
         exclude_patterns: vec!["sh:/home/*/.cache".to_string()],
         exclude_if_present: vec![],
         optional: false,
-    };
+        retention: None,
+    }];
 
-    let offsite_repo = if use_offsite {
-        Some(RepoConfig {
+    if use_offsite {
+        repos.push(RepoConfig {
+            name: "offsite".to_string(),
             path: format!("{server_base}/mnt/offsite/repos/{client_name}"),
             ssh_key: borg_offsite_key.as_ref().unwrap().display().to_string(),
             passphrase_file: pass_offsite_path.as_ref().unwrap().display().to_string(),
@@ -197,16 +399,14 @@ async fn run_client_wizard() -> Result<()> {
             exclude_patterns: vec![],
             exclude_if_present: vec![],
             optional: true,
-        })
-    } else {
-        None
-    };
+            retention: None,
+        });
+    }
 
     let client = ClientConfig {
         name: client_name.clone(),
         hostname: hostname.clone(),
-        main_repo,
-        offsite_repo,
+        repos,
     };
 
     let ntfy = if ntfy_url.is_empty() {
@@ -382,7 +582,8 @@ async fn run_management_wizard() -> Result<()> {
         };
 
         let server_base = format!("ssh://borgmgmt@{server_host}");
-        let main_repo = RepoConfig {
+        let mut repos = vec![RepoConfig {
+            name: "main".to_string(),
             path: format!("{server_base}/backup/repos/{name}"),
             ssh_key: expand_tilde("~/.ssh/borg_mgmt_ed25519").display().to_string(),
             passphrase_file: pass_main,
@@ -391,24 +592,28 @@ async fn run_management_wizard() -> Result<()> {
             exclude_patterns: vec![],
             exclude_if_present: vec![],
             optional: false,
-        };
+            retention: None,
+        }];
 
-        let offsite_repo = offsite_pass.map(|pass| RepoConfig {
-            path: format!("{server_base}/mnt/offsite/repos/{name}"),
-            ssh_key: expand_tilde("~/.ssh/borg_mgmt_ed25519").display().to_string(),
-            passphrase_file: pass,
-            sources: vec![],
-            compression: "auto,zstd".to_string(),
-            exclude_patterns: vec![],
-            exclude_if_present: vec![],
-            optional: true,
-        });
+        if let Some(pass) = offsite_pass {
+            repos.push(RepoConfig {
+                name: "offsite".to_string(),
+                path: format!("{server_base}/mnt/offsite/repos/{name}"),
+                ssh_key: expand_tilde("~/.ssh/borg_mgmt_ed25519").display().to_string(),
+                passphrase_file: pass,
+                sources: vec![],
+                compression: "auto,zstd".to_string(),
+                exclude_patterns: vec![],
+                exclude_if_present: vec![],
+                optional: true,
+                retention: None,
+            });
+        }
 
         clients.push(ClientConfig {
             name,
             hostname: String::new(),
-            main_repo,
-            offsite_repo,
+            repos,
         });
     }
 
@@ -420,15 +625,17 @@ async fn run_management_wizard() -> Result<()> {
             std::fs::create_dir_all(&keys_dir).context("Failed to create ~/.borg-keys")?;
             set_dir_permissions(&keys_dir, 0o700);
 
-            let pass_path = expand_tilde(&local_client.main_repo.passphrase_file);
-            if !pass_path.exists() {
-                let passphrase = generate_passphrase();
-                std::fs::write(&pass_path, &passphrase)
-                    .with_context(|| format!("Failed to write passphrase: {}", pass_path.display()))?;
-                set_file_permissions(&pass_path, 0o600);
-                println!("Generated passphrase for local host → {}", pass_path.display());
-            } else {
-                println!("Passphrase already exists for local host: {}", pass_path.display());
+            if let Some(main_repo) = local_client.main_repo() {
+                let pass_path = expand_tilde(&main_repo.passphrase_file);
+                if !pass_path.exists() {
+                    let passphrase = generate_passphrase();
+                    std::fs::write(&pass_path, &passphrase)
+                        .with_context(|| format!("Failed to write passphrase: {}", pass_path.display()))?;
+                    set_file_permissions(&pass_path, 0o600);
+                    println!("Generated passphrase for local host → {}", pass_path.display());
+                } else {
+                    println!("Passphrase already exists for local host: {}", pass_path.display());
+                }
             }
         }
     }
@@ -451,7 +658,6 @@ async fn run_management_wizard() -> Result<()> {
         Some(NtfyConfig { url: ntfy_url, token: ntfy_token, topic: ntfy_topic })
     };
 
-    // Use a dummy server config for management (server fields still needed)
     let config = Config {
         server: ServerConfig {
             host: server_host.clone(),

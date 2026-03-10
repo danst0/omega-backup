@@ -74,10 +74,9 @@ pub async fn run_check(config: &Config) -> Result<()> {
     } else {
         println!("\nChecking {} clients...", config.clients.len());
         for client in &config.clients {
-            let repo_path = &client.main_repo.path;
-            // Parse repo path to see if it's local or remote
-            // Usually ssh://user@host/path
-            println!("   - {}: Repo {}", client.name, repo_path);
+            for repo in &client.repos {
+                println!("   - {}/{}: Repo {}", client.name, repo.name, repo.path);
+            }
         }
     }
 

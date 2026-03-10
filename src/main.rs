@@ -15,7 +15,7 @@ mod check;
 mod update;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -65,9 +65,9 @@ enum Commands {
 
     /// Run a backup (client mode)
     Backup {
-        /// Which repo to back up: main, offsite, or both (default)
-        #[arg(long, value_enum)]
-        only: Option<BackupTarget>,
+        /// Only back up this repo (e.g. --repo main, --repo offsite)
+        #[arg(long)]
+        repo: Option<String>,
     },
 
     /// Run maintenance: prune, compact, check (management mode)
@@ -76,9 +76,9 @@ enum Commands {
         #[arg(long)]
         skip_check: bool,
 
-        /// Also maintain offsite repos
+        /// Only maintain this repo (e.g. --repo offsite); default: all repos
         #[arg(long)]
-        offsite: bool,
+        repo: Option<String>,
     },
 
     /// Discover the MAC address of a host via ARP (host must be online)
@@ -91,6 +91,10 @@ enum Commands {
     RestoreTest {
         /// Client name to test
         client: String,
+
+        /// Which repo to test (default: "main")
+        #[arg(long, default_value = "main")]
+        repo: String,
 
         /// Number of archives to list
         #[arg(long, default_value = "5")]
@@ -122,9 +126,9 @@ enum Commands {
     Reset {
         /// Client name to reset
         client: String,
-        /// Which repo to reset: main, offsite, or both (default)
-        #[arg(long, value_enum)]
-        only: Option<BackupTarget>,
+        /// Only reset this repo (e.g. --repo main, --repo offsite); default: all repos
+        #[arg(long)]
+        repo: Option<String>,
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
@@ -132,12 +136,6 @@ enum Commands {
 
     /// Update omega-backup to the latest version from GitHub
     Update,
-}
-
-#[derive(Debug, Clone, ValueEnum)]
-pub enum BackupTarget {
-    Main,
-    Offsite,
 }
 
 #[derive(Debug, Subcommand)]
@@ -257,20 +255,21 @@ async fn run(cli: Cli) -> Result<()> {
             init::run_init(&config, client.as_deref(), dry_run, verbose).await?;
         }
 
-        Commands::Backup { ref only } => {
-            let args = backup::BackupArgs { dry_run, verbose, only: only.clone() };
+        Commands::Backup { ref repo } => {
+            let args = backup::BackupArgs { dry_run, verbose, repo: repo.clone() };
             backup::run_backup(&config, &args).await?;
         }
 
-        Commands::Maintain { skip_check, offsite } => {
-            let args = maintenance::MaintenanceArgs { dry_run, verbose, skip_check, offsite };
+        Commands::Maintain { skip_check, ref repo } => {
+            let args = maintenance::MaintenanceArgs { dry_run, verbose, skip_check, repo: repo.clone() };
             maintenance::run_maintenance(&config, &args).await?;
         }
 
-        Commands::RestoreTest { client, list_count, extract, archive, paths } => {
+        Commands::RestoreTest { client, repo, list_count, extract, archive, paths } => {
             let args = restore::RestoreArgs {
                 dry_run,
                 verbose,
+                repo,
                 list_count,
                 extract,
                 archive,
@@ -291,8 +290,8 @@ async fn run(cli: Cli) -> Result<()> {
             check::run_check(&config).await?;
         }
 
-        Commands::Reset { ref client, ref only, yes } => {
-            let args = reset::ResetArgs { dry_run, verbose, only: only.clone(), yes };
+        Commands::Reset { ref client, ref repo, yes } => {
+            let args = reset::ResetArgs { dry_run, verbose, repo: repo.clone(), yes };
             reset::run_reset(&config, client, &args).await?;
         }
 

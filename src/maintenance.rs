@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use crate::{
     borg::{self, BorgContext, PrunePolicy},
-    config::{AppState, ClientConfig, Config},
+    config::{AppState, ClientConfig, Config, RepoConfig},
     ntfy::{self, NotificationSummary, NtfyConfig},
-    ssh::{self, SshConfig, shutdown_server},
+    ssh::{self, SshConfig, count_lockfiles, shutdown_server},
     wol,
 };
 
@@ -14,7 +14,7 @@ pub struct MaintenanceArgs {
     pub dry_run: bool,
     pub verbose: bool,
     pub skip_check: bool,
-    pub offsite: bool,
+    pub repo: Option<String>,
 }
 
 /// Run `omega-backup maintain` — Mode 2: Management maintenance workflow.
@@ -97,10 +97,22 @@ pub async fn run_maintenance(config: &Config, args: &MaintenanceArgs) -> Result<
         }
     }
 
-    // Step 5: Shutdown server
+    // Step 5: Shutdown server — only if no backup lockfiles are present
     if !args.dry_run {
-        println!("\nShutting down server...");
-        let _ = shutdown_server(&ssh).await;
+        match count_lockfiles(&ssh).await {
+            Ok(0) => {
+                tracing::info!("No active backup lockfiles — shutting down server");
+                println!("\nNo active backups — shutting down server.");
+                let _ = shutdown_server(&ssh).await;
+            }
+            Ok(n) => {
+                tracing::info!("{} backup lockfile(s) present — leaving server online", n);
+                println!("\n{n} backup(s) still in progress — leaving server online.");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to count lockfiles, leaving server online: {}", e);
+            }
+        }
     }
 
     // Print summary
@@ -125,90 +137,75 @@ async fn maintain_client(
 ) -> Result<Vec<String>> {
     let mut lines = vec![];
 
+    // Determine which repos to maintain
+    let repos: Vec<&RepoConfig> = match &args.repo {
+        Some(name) => {
+            let repo = client.find_repo(name)
+                .with_context(|| format!("Repo '{}' not found for client '{}'", name, client.name))?;
+            vec![repo]
+        }
+        None => client.repos.iter().collect(),
+    };
+
     // Determine if a full check is needed
     let needs_check = !args.skip_check && should_run_check(state, &client.name, config.borg.check_frequency_days);
 
-    // Main repo maintenance
-    let main_ctx = BorgContext::new(&client.main_repo.path, &client.main_repo.passphrase_file)
-        .with_ssh_key(&client.main_repo.ssh_key)
-        .with_binary(&config.borg.binary)
-        .with_dry_run(args.dry_run)
-        .with_verbose(args.verbose);
+    for repo in &repos {
+        let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
+            .with_ssh_key(&repo.ssh_key)
+            .with_binary(&config.borg.binary)
+            .with_dry_run(args.dry_run)
+            .with_verbose(args.verbose);
 
-    let policy = PrunePolicy {
-        keep_daily: config.retention.keep_daily,
-        keep_weekly: config.retention.keep_weekly,
-        keep_monthly: config.retention.keep_monthly,
-        keep_yearly: config.retention.keep_yearly,
-        prefix: Some(client.hostname.clone()),
-    };
+        let retention = repo.retention.as_ref().unwrap_or(&config.retention);
+        let policy = PrunePolicy {
+            keep_daily: retention.keep_daily,
+            keep_weekly: retention.keep_weekly,
+            keep_monthly: retention.keep_monthly,
+            keep_yearly: retention.keep_yearly,
+            prefix: Some(client.hostname.clone()),
+        };
 
-    // prune
-    borg::prune(&main_ctx, &policy)
-        .await
-        .with_context(|| format!("prune failed for {}", client.main_repo.path))?;
-    lines.push(format!("{}: prune OK", client.name));
-
-    // compact
-    borg::compact(&main_ctx)
-        .await
-        .with_context(|| format!("compact failed for {}", client.main_repo.path))?;
-    lines.push(format!("{}: compact OK", client.name));
-
-    // check
-    if needs_check {
-        borg::check(&main_ctx, true)
-            .await
-            .with_context(|| format!("check failed for {}", client.main_repo.path))?;
-        lines.push(format!("{}: check OK", client.name));
-
-        if !args.dry_run {
-            let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-            let cs = state.client_mut(&client.name);
-            cs.last_check_timestamp = Some(now);
-            cs.integrity_status = Some("ok".to_string());
-        }
-    } else {
-        // Quick repo-level check
-        borg::check(&main_ctx, false)
-            .await
-            .with_context(|| format!("quick check failed for {}", client.main_repo.path))?;
-        lines.push(format!("{}: quick-check OK", client.name));
-    }
-
-    // Offsite repo maintenance (if enabled)
-    if args.offsite {
-        if let Some(ref offsite) = client.offsite_repo {
-            let offsite_ctx = BorgContext::new(&offsite.path, &offsite.passphrase_file)
-                .with_ssh_key(&offsite.ssh_key)
-                .with_binary(&config.borg.binary)
-                .with_dry_run(args.dry_run)
-                .with_verbose(args.verbose);
-
-            let offsite_retention = config.offsite_retention.as_ref().unwrap_or(&config.retention);
-            let offsite_policy = PrunePolicy {
-                keep_daily: offsite_retention.keep_daily,
-                keep_weekly: offsite_retention.keep_weekly,
-                keep_monthly: offsite_retention.keep_monthly,
-                keep_yearly: offsite_retention.keep_yearly,
-                prefix: Some(client.hostname.clone()),
-            };
-
-            match borg::prune(&offsite_ctx, &offsite_policy).await {
-                Ok(()) => lines.push(format!("{}: offsite prune OK", client.name)),
-                Err(e) if offsite.optional => {
-                    tracing::warn!("Offsite prune failed (optional): {}", e);
-                    lines.push(format!("{}: offsite prune WARN: {e}", client.name));
-                }
-                Err(e) => return Err(e).context("Offsite prune failed"),
+        // prune
+        match borg::prune(&ctx, &policy).await {
+            Ok(()) => lines.push(format!("{}/{}: prune OK", client.name, repo.name)),
+            Err(e) if repo.optional => {
+                tracing::warn!("{} prune failed (optional): {}", repo.name, e);
+                lines.push(format!("{}/{}: prune WARN: {e}", client.name, repo.name));
+                continue;
             }
+            Err(e) => return Err(e).with_context(|| format!("prune failed for {}", repo.path)),
+        }
 
-            match borg::compact(&offsite_ctx).await {
-                Ok(()) => lines.push(format!("{}: offsite compact OK", client.name)),
-                Err(e) if offsite.optional => {
-                    tracing::warn!("Offsite compact failed (optional): {}", e);
+        // compact
+        match borg::compact(&ctx).await {
+            Ok(()) => lines.push(format!("{}/{}: compact OK", client.name, repo.name)),
+            Err(e) if repo.optional => {
+                tracing::warn!("{} compact failed (optional): {}", repo.name, e);
+                continue;
+            }
+            Err(e) => return Err(e).with_context(|| format!("compact failed for {}", repo.path)),
+        }
+
+        // check (only for non-optional repos or main repo)
+        if repo.name == "main" || !repo.optional {
+            if needs_check {
+                borg::check(&ctx, true)
+                    .await
+                    .with_context(|| format!("check failed for {}", repo.path))?;
+                lines.push(format!("{}/{}: check OK", client.name, repo.name));
+
+                if !args.dry_run && repo.name == "main" {
+                    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                    let cs = state.client_mut(&client.name);
+                    cs.last_check_timestamp = Some(now);
+                    cs.integrity_status = Some("ok".to_string());
                 }
-                Err(e) => return Err(e).context("Offsite compact failed"),
+            } else {
+                borg::check(&ctx, false)
+                    .await
+                    .with_context(|| format!("quick check failed for {}", repo.path))?;
+                lines.push(format!("{}/{}: quick-check OK", client.name, repo.name));
             }
         }
     }

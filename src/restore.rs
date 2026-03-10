@@ -12,6 +12,7 @@ use crate::{
 pub struct RestoreArgs {
     pub dry_run: bool,
     pub verbose: bool,
+    pub repo: String,
     pub list_count: usize,
     pub extract: bool,
     pub archive: Option<String>,
@@ -24,7 +25,10 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
         .find_client(client_name)
         .with_context(|| format!("Client '{}' not found in config", client_name))?;
 
-    println!("Starting restore test for client: {}", client.name);
+    let repo = client.find_repo(&args.repo)
+        .with_context(|| format!("Repo '{}' not found for client '{}'", args.repo, client_name))?;
+
+    println!("Starting restore test for client: {} (repo: {})", client.name, repo.name);
 
     // Step 1: Wake-on-LAN (server may be offline)
     tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
@@ -46,8 +50,8 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
     .await
     .context("Backup server did not come online")?;
 
-    let ctx = BorgContext::new(&client.main_repo.path, &client.main_repo.passphrase_file)
-        .with_ssh_key(&client.main_repo.ssh_key)
+    let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
+        .with_ssh_key(&repo.ssh_key)
         .with_binary(&config.borg.binary)
         .with_dry_run(args.dry_run)
         .with_verbose(args.verbose);
@@ -59,7 +63,7 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
         .context("Failed to list archives")?;
 
     if archives.is_empty() {
-        anyhow::bail!("No archives found in repository: {}", client.main_repo.path);
+        anyhow::bail!("No archives found in repository: {}", repo.path);
     }
 
     for (i, archive) in archives.iter().enumerate() {
@@ -98,6 +102,7 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
 
     println!("\n=== Restore Test Summary ===");
     println!("  Client: {}", client.name);
+    println!("  Repo: {}", repo.name);
     println!("  Archive: {archive_name}");
     println!("  Dry-run extract: PASSED");
     if args.extract {

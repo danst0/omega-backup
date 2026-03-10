@@ -3,15 +3,15 @@ use std::time::Duration;
 
 use crate::{
     borg::{self, BorgContext},
-    config::Config,
+    config::{Config, RepoConfig},
     ssh::{self, SshConfig},
-    wol, BackupTarget,
+    wol,
 };
 
 pub struct ResetArgs {
     pub dry_run: bool,
     pub verbose: bool,
-    pub only: Option<BackupTarget>,
+    pub repo: Option<String>,
     pub yes: bool,
 }
 
@@ -22,22 +22,19 @@ pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs) -> 
         .with_context(|| format!("Client '{}' not found in config", client_name))?;
 
     // Determine which repos to reset
-    let do_main = !matches!(args.only, Some(BackupTarget::Offsite));
-    let do_offsite = !matches!(args.only, Some(BackupTarget::Main));
-
-    if do_offsite && client.offsite_repo.is_none() {
-        anyhow::bail!("Client '{}' has no offsite repo configured", client_name);
-    }
+    let repos: Vec<&RepoConfig> = match &args.repo {
+        Some(name) => {
+            let repo = client.find_repo(name)
+                .with_context(|| format!("Repo '{}' not found for client '{}'", name, client_name))?;
+            vec![repo]
+        }
+        None => client.repos.iter().collect(),
+    };
 
     // Show what will be reset and confirm
     println!("Will reset the following for client '{}':", client_name);
-    if do_main {
-        println!("  - Main repo: {}", client.main_repo.path);
-    }
-    if do_offsite {
-        if let Some(ref offsite) = client.offsite_repo {
-            println!("  - Offsite repo: {}", offsite.path);
-        }
+    for repo in &repos {
+        println!("  - {} repo: {}", repo.name, repo.path);
     }
     println!();
     println!("This will PERMANENTLY DELETE these repositories and reinitialize them.");
@@ -75,71 +72,40 @@ pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs) -> 
     .context("Backup server did not come online in time")?;
 
     let keys_dir = config.keys_local_dir();
+    let mut has_non_main = false;
 
-    // Reset main repo
-    if do_main {
-        println!("\n--- Resetting main repo ---");
-        let server_path = parse_repo_server_path(&client.main_repo.path)?;
-        reset_repo(
-            &ssh,
-            &server_path,
-            &keys_dir.join(format!("{}-main.key", client_name)),
-            args.dry_run,
-        )
-        .await?;
+    for repo in &repos {
+        if repo.name != "main" {
+            has_non_main = true;
+        }
 
-        // Reinitialize
+        println!("\n--- Resetting {} repo ---", repo.name);
+        let server_path = parse_repo_server_path(&repo.path)?;
+        let key_path = keys_dir.join(format!("{}-{}.key", client_name, repo.name));
+
+        reset_repo(&ssh, &server_path, &key_path, args.dry_run).await?;
+
         reinit_repo(
             config,
-            &client.main_repo.path,
-            &client.main_repo.passphrase_file,
-            &client.main_repo.ssh_key,
-            &keys_dir.join(format!("{}-main.key", client_name)),
+            &repo.path,
+            &repo.passphrase_file,
+            &repo.ssh_key,
+            &key_path,
             args.dry_run,
             args.verbose,
         )
         .await
-        .context("Failed to reinitialize main repo")?;
+        .with_context(|| format!("Failed to reinitialize {} repo", repo.name))?;
 
-        println!("  Main repo reset complete.");
-    }
-
-    // Reset offsite repo
-    if do_offsite {
-        if let Some(ref offsite) = client.offsite_repo {
-            println!("\n--- Resetting offsite repo ---");
-            let server_path = parse_repo_server_path(&offsite.path)?;
-            reset_repo(
-                &ssh,
-                &server_path,
-                &keys_dir.join(format!("{}-offsite.key", client_name)),
-                args.dry_run,
-            )
-            .await?;
-
-            // Reinitialize
-            reinit_repo(
-                config,
-                &offsite.path,
-                &offsite.passphrase_file,
-                &offsite.ssh_key,
-                &keys_dir.join(format!("{}-offsite.key", client_name)),
-                args.dry_run,
-                args.verbose,
-            )
-            .await
-            .context("Failed to reinitialize offsite repo")?;
-
-            println!("  Offsite repo reset complete.");
-        }
+        println!("  {} repo reset complete.", repo.name);
     }
 
     println!("\nReset complete.");
 
-    if do_offsite {
+    if has_non_main {
         println!();
         println!("Hint: Run `omega-backup config listen` on this machine, then");
-        println!("      `omega-backup config sync` on the client to update its offsite passphrase.");
+        println!("      `omega-backup config sync` on the client to update its passphrases.");
     }
 
     Ok(())

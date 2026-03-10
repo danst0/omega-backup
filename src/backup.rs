@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::{
     borg::{self, BorgContext},
-    config::{AppState, ClientConfig, Config},
+    config::{AppState, ClientConfig, Config, RepoConfig},
     ntfy::{self, NotificationSummary, NtfyConfig},
     ssh::{self, SshConfig, count_lockfiles, remove_lockfile, set_lockfile, shutdown_server},
     wol,
@@ -13,7 +13,7 @@ use crate::{
 pub struct BackupArgs {
     pub dry_run: bool,
     pub verbose: bool,
-    pub only: Option<crate::BackupTarget>,
+    pub repo: Option<String>,
 }
 
 /// Run `omega-backup backup` — Mode 1: Client backup workflow.
@@ -32,13 +32,27 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
             client.name
         );
     }
-    if client.main_repo.sources.is_empty() {
+
+    let main_repo = client.main_repo().context(
+        format!("Client '{}' has no main repo configured.", client.name)
+    )?;
+    if main_repo.sources.is_empty() {
         anyhow::bail!(
             "Client '{}' has no backup sources configured. \
-             Add sources to [clients.main_repo] in config.toml.",
+             Add sources to the main repo in config.toml.",
             client.name
         );
     }
+
+    // Resolve which repos to back up
+    let repos: Vec<&RepoConfig> = match &args.repo {
+        Some(name) => {
+            let repo = client.find_repo(name)
+                .with_context(|| format!("Repo '{}' not found for client '{}'", name, client.name))?;
+            vec![repo]
+        }
+        None => client.repos.iter().collect(),
+    };
 
     println!("Starting backup for client: {}", client.name);
 
@@ -75,59 +89,38 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
     let mut total_duration = 0.0f64;
     let mut total_dedup = 0u64;
 
-    let run_main = !matches!(args.only, Some(crate::BackupTarget::Offsite));
-    let run_offsite = !matches!(args.only, Some(crate::BackupTarget::Main));
-
-    // Step 4: borg create — main repo
-    if run_main {
-        let main_result = run_create(config, client, &client.main_repo, args).await;
-        match main_result {
-            Ok(result) => {
+    // Step 4: borg create for each selected repo
+    for repo in &repos {
+        let result = run_create(config, client, repo, args).await;
+        match result {
+            Ok(create_result) => {
                 messages.push(format!(
-                    "Main backup: OK ({:.1}s, dedup {} B)",
-                    result.duration_secs, result.deduplicated_size
+                    "{} backup: OK ({:.1}s, dedup {} B)",
+                    repo.name, create_result.duration_secs, create_result.deduplicated_size
                 ));
-                total_duration += result.duration_secs;
-                total_dedup += result.deduplicated_size;
-                tracing::info!("Main backup complete: {}", result.archive_name);
+                total_duration += create_result.duration_secs;
+                total_dedup += create_result.deduplicated_size;
+                tracing::info!("{} backup complete: {}", repo.name, create_result.archive_name);
             }
             Err(e) => {
-                overall_success = false;
-                messages.push(format!("Main backup FAILED: {e:#}"));
-                tracing::error!("Main backup failed: {}", e);
-            }
-        }
-    }
-
-    // Step 5: borg create — offsite repo (optional)
-    if run_offsite {
-        if let Some(ref offsite) = client.offsite_repo {
-            let offsite_result = run_create(config, client, offsite, args).await;
-            match offsite_result {
-                Ok(result) => {
-                    messages.push(format!(
-                        "Offsite backup: OK ({:.1}s, dedup {} B)",
-                        result.duration_secs, result.deduplicated_size
-                    ));
-                    total_duration += result.duration_secs;
-                    total_dedup += result.deduplicated_size;
-                    tracing::info!("Offsite backup complete: {}", result.archive_name);
-                }
-                Err(e) => {
-                    // Offsite failures are warnings, not hard errors
-                    messages.push(format!("Offsite backup FAILED (optional): {e:#}"));
-                    tracing::warn!("Offsite backup failed: {}", e);
+                if repo.optional {
+                    messages.push(format!("{} backup FAILED (optional): {e:#}", repo.name));
+                    tracing::warn!("{} backup failed (optional): {}", repo.name, e);
+                } else {
+                    overall_success = false;
+                    messages.push(format!("{} backup FAILED: {e:#}", repo.name));
+                    tracing::error!("{} backup failed: {}", repo.name, e);
                 }
             }
         }
     }
 
-    // Step 6: Remove lockfile
+    // Step 5: Remove lockfile
     if !args.dry_run {
         let _ = remove_lockfile(&ssh, &client.hostname).await;
     }
 
-    // Step 7: Update state
+    // Step 6: Update state
     let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let result_str = if overall_success { "success" } else { "failed" };
     if !args.dry_run {
@@ -142,7 +135,7 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
         }
     }
 
-    // Step 8: Send ntfy notification
+    // Step 7: Send ntfy notification
     let summary_message = messages.join("\n");
     if let Some(ref ntfy_cfg) = config.ntfy {
         let summary = NotificationSummary {
@@ -162,7 +155,7 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
         }
     }
 
-    // Step 9: Check lockfiles and potentially shut down server
+    // Step 8: Check lockfiles and potentially shut down server
     if !args.dry_run {
         match count_lockfiles(&ssh).await {
             Ok(0) => {
@@ -198,7 +191,7 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
 async fn run_create(
     config: &Config,
     client: &ClientConfig,
-    repo: &crate::config::RepoConfig,
+    repo: &RepoConfig,
     args: &BackupArgs,
 ) -> Result<borg::BorgCreateResult> {
     let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)

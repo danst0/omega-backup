@@ -111,7 +111,7 @@ pub async fn run_listen(config: &Config) -> Result<()> {
     let app = Router::new()
         .route("/passphrase", post(handle_post_passphrase))
         .route("/keyfile", post(handle_post_keyfile))
-        .route("/offsite-passphrase/{client_name}", get(handle_get_offsite_passphrase))
+        .route("/repo-passphrase/{client_name}/{repo_name}", get(handle_get_repo_passphrase))
         .with_state(state.clone());
 
     // Bind to a random port
@@ -258,27 +258,27 @@ async fn handle_post_keyfile(
     }
 }
 
-async fn handle_get_offsite_passphrase(
+async fn handle_get_repo_passphrase(
     State(state): State<ServerState>,
-    Path(client_name): Path<String>,
+    Path((client_name, repo_name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let pass_path = state.keys_dir.join(format!("{client_name}-offsite.pass"));
+    let pass_path = state.keys_dir.join(format!("{client_name}-{repo_name}.pass"));
     match std::fs::read_to_string(&pass_path) {
         Ok(passphrase) => {
             let trimmed = passphrase.trim();
             match encrypt(&state.session_key, trimmed.as_bytes()) {
                 Ok(encrypted) => {
-                    tracing::info!("Served offsite passphrase for {}", client_name);
+                    tracing::info!("Served {} passphrase for {}", repo_name, client_name);
                     (StatusCode::OK, encrypted)
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to encrypt offsite passphrase: {}", e);
+                    tracing::warn!("Failed to encrypt {} passphrase: {}", repo_name, e);
                     (StatusCode::INTERNAL_SERVER_ERROR, Vec::new())
                 }
             }
         }
         Err(_) => {
-            tracing::info!("No offsite passphrase for {} at {}", client_name, pass_path.display());
+            tracing::info!("No {} passphrase for {} at {}", repo_name, client_name, pass_path.display());
             (StatusCode::NOT_FOUND, Vec::new())
         }
     }
@@ -359,33 +359,33 @@ pub async fn run_sync(config: &Config, client_name: &str, host: Option<&str>) ->
         println!("Sent keyfile to management machine.");
     }
 
-    // Pull offsite passphrase from management (if client has offsite repo)
+    // Pull passphrases for non-main repos from management
     if let Some(client) = config.find_client(client_name) {
-        if let Some(ref offsite) = client.offsite_repo {
+        for repo in client.non_main_repos() {
             let resp = http
-                .get(format!("{base_url}/offsite-passphrase/{client_name}"))
+                .get(format!("{base_url}/repo-passphrase/{client_name}/{}", repo.name))
                 .send()
                 .await
-                .context("Failed to request offsite passphrase")?;
+                .with_context(|| format!("Failed to request {} passphrase", repo.name))?;
             if resp.status().is_success() {
                 let encrypted = resp.bytes().await?;
                 let passphrase = decrypt(&session_key, &encrypted)?;
-                let pass_path = expand_tilde(&offsite.passphrase_file);
+                let pass_path = expand_tilde(&repo.passphrase_file);
                 if let Some(parent) = pass_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
                 std::fs::write(&pass_path, &passphrase)
-                    .with_context(|| format!("Failed to write offsite passphrase to {}", pass_path.display()))?;
+                    .with_context(|| format!("Failed to write {} passphrase to {}", repo.name, pass_path.display()))?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(&pass_path, std::fs::Permissions::from_mode(0o600))?;
                 }
-                println!("Received offsite passphrase → {}", pass_path.display());
+                println!("Received {} passphrase → {}", repo.name, pass_path.display());
             } else if resp.status() == StatusCode::NOT_FOUND {
-                println!("No offsite passphrase available on management machine (not yet initialized?).");
+                println!("No {} passphrase available on management machine (not yet initialized?).", repo.name);
             } else {
-                tracing::warn!("Failed to get offsite passphrase: {}", resp.status());
+                tracing::warn!("Failed to get {} passphrase: {}", repo.name, resp.status());
             }
         }
     }
