@@ -2,10 +2,10 @@ use anyhow::{Context, Result};
 use axum::{
     Router,
     body::Bytes,
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
 };
 use std::{
     sync::{Arc, Mutex},
@@ -85,6 +85,7 @@ struct ReceivedData {
 struct ServerState {
     session_key: Arc<[u8; 32]>,
     received: Arc<Mutex<ReceivedData>>,
+    keys_dir: Arc<std::path::PathBuf>,
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -100,14 +101,17 @@ pub async fn run_listen(config: &Config) -> Result<()> {
 
     let session_key = Arc::new(derive_session_key(&code));
 
+    let keys_dir = expand_tilde(&config.keys.local_dir);
     let state = ServerState {
         session_key: session_key.clone(),
         received: Arc::new(Mutex::new(ReceivedData::default())),
+        keys_dir: Arc::new(keys_dir),
     };
 
     let app = Router::new()
         .route("/passphrase", post(handle_post_passphrase))
         .route("/keyfile", post(handle_post_keyfile))
+        .route("/offsite-passphrase/{client_name}", get(handle_get_offsite_passphrase))
         .with_state(state.clone());
 
     // Bind to a random port
@@ -254,6 +258,32 @@ async fn handle_post_keyfile(
     }
 }
 
+async fn handle_get_offsite_passphrase(
+    State(state): State<ServerState>,
+    Path(client_name): Path<String>,
+) -> impl IntoResponse {
+    let pass_path = state.keys_dir.join(format!("{client_name}-offsite.pass"));
+    match std::fs::read_to_string(&pass_path) {
+        Ok(passphrase) => {
+            let trimmed = passphrase.trim();
+            match encrypt(&state.session_key, trimmed.as_bytes()) {
+                Ok(encrypted) => {
+                    tracing::info!("Served offsite passphrase for {}", client_name);
+                    (StatusCode::OK, encrypted)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to encrypt offsite passphrase: {}", e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, Vec::new())
+                }
+            }
+        }
+        Err(_) => {
+            tracing::info!("No offsite passphrase for {} at {}", client_name, pass_path.display());
+            (StatusCode::NOT_FOUND, Vec::new())
+        }
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // `omega-backup config sync` (client machine)
 // ────────────────────────────────────────────────────────────────
@@ -327,6 +357,37 @@ pub async fn run_sync(config: &Config, client_name: &str, host: Option<&str>) ->
             anyhow::bail!("Server rejected keyfile: {}", resp.status());
         }
         println!("Sent keyfile to management machine.");
+    }
+
+    // Pull offsite passphrase from management (if client has offsite repo)
+    if let Some(client) = config.find_client(client_name) {
+        if let Some(ref offsite) = client.offsite_repo {
+            let resp = http
+                .get(format!("{base_url}/offsite-passphrase/{client_name}"))
+                .send()
+                .await
+                .context("Failed to request offsite passphrase")?;
+            if resp.status().is_success() {
+                let encrypted = resp.bytes().await?;
+                let passphrase = decrypt(&session_key, &encrypted)?;
+                let pass_path = expand_tilde(&offsite.passphrase_file);
+                if let Some(parent) = pass_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&pass_path, &passphrase)
+                    .with_context(|| format!("Failed to write offsite passphrase to {}", pass_path.display()))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&pass_path, std::fs::Permissions::from_mode(0o600))?;
+                }
+                println!("Received offsite passphrase → {}", pass_path.display());
+            } else if resp.status() == StatusCode::NOT_FOUND {
+                println!("No offsite passphrase available on management machine (not yet initialized?).");
+            } else {
+                tracing::warn!("Failed to get offsite passphrase: {}", resp.status());
+            }
+        }
     }
 
     println!("\nSync complete.");

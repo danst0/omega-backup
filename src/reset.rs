@@ -135,6 +135,13 @@ pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs) -> 
     }
 
     println!("\nReset complete.");
+
+    if do_offsite {
+        println!();
+        println!("Hint: Run `omega-backup config listen` on this machine, then");
+        println!("      `omega-backup config sync` on the client to update its offsite passphrase.");
+    }
+
     Ok(())
 }
 
