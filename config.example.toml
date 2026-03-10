@@ -17,22 +17,30 @@ url = "https://ntfy.example.com/backup-topic"
 name = "client1"
 hostname = "client1.local"   # used for archive names and lockfile
 
-[clients.main_repo]
+[[clients.repos]]
+name = "main"
 path = "ssh://borguser@backupserver/backup/repos/client1"
-ssh_key = "/root/.ssh/borg_main_ed25519"
-passphrase_file = "/root/.borg-keys/client1.pass"
+ssh_key = "/root/.ssh/borg_client1_main_ed25519"
+passphrase_file = "/root/.borg-keys/client1-main.pass"
 sources = ["/data", "/etc", "/home"]
 compression = "auto,zstd"
 exclude_patterns = ["sh:/home/*/.cache"]
 exclude_if_present = [".nobackup"]   # skip directories containing this file
 
-[clients.offsite_repo]
+[[clients.repos]]
+name = "offsite"
 path = "ssh://borguser@backupserver/mnt/offsite/repos/client1"
-ssh_key = "/root/.ssh/borg_offsite_ed25519"
+ssh_key = "/root/.ssh/borg_client1_offsite_ed25519"
 passphrase_file = "/root/.borg-keys/client1-offsite.pass"
 sources = ["/data/paperless", "/data/docker-compose", "/etc", "/home"]
 compression = "auto,zstd"
 optional = true   # errors are warnings, not failures
+# Per-repo retention override (omit to use global [retention])
+# [clients.repos.retention]
+# keep_daily = 3
+# keep_weekly = 2
+# keep_monthly = 6
+# keep_yearly = 0
 
 [keys]
 local_dir = "~/.borg-keys/"              # keyfiles + passphrases stored locally
@@ -48,9 +56,3 @@ keep_daily = 7
 keep_weekly = 4
 keep_monthly = 12
 keep_yearly = 2
-
-[offsite_retention]
-keep_daily = 3
-keep_weekly = 2
-keep_monthly = 6
-keep_yearly = 0

@@ -316,7 +316,7 @@ pub struct Config {
     pub retention: RetentionConfig,
     /// Deprecated: use per-repo retention overrides instead. Still accepted for backward compat.
     #[serde(default, skip_serializing)]
-    offsite_retention: Option<RetentionConfig>,
+    pub(crate) offsite_retention: Option<RetentionConfig>,
     #[serde(default)]
     pub update: UpdateConfig,
 }
