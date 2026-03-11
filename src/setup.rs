@@ -161,7 +161,9 @@ async fn run_add_repo_wizard(config_path: &std::path::Path) -> Result<()> {
         sources,
         compression: "auto,zstd".to_string(),
         exclude_patterns: vec![],
+        exclude_patterns_from: vec![],
         exclude_if_present: vec![],
+        borg_filter: None,
         optional,
         retention: None,
     };
@@ -231,8 +233,53 @@ async fn run_edit_client_wizard(config_path: &std::path::Path) -> Result<()> {
         };
     }
 
+    // Per-repo SSH key regeneration
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+    let ssh_dir = home.join(".ssh");
+    std::fs::create_dir_all(&ssh_dir).context("Failed to create ~/.ssh")?;
+
+    let client_name = client.name.clone();
+    let mut repos_with_new_keys: Vec<usize> = vec![];
+
+    for (i, repo) in client.repos.iter_mut().enumerate() {
+        println!("\n  --- SSH key for repo '{}' (current: {}) ---", repo.name, repo.ssh_key);
+        let regen = Confirm::new()
+            .with_prompt(format!("  Regenerate SSH key for repo '{}'?", repo.name))
+            .default(false)
+            .interact()
+            .context("Confirm failed")?;
+
+        if regen {
+            let new_key_path = ssh_dir.join(format!("borg_{}_{}_ed25519", client_name, repo.name));
+
+            // Rename old key pair to .bak so they are not lost
+            if new_key_path.exists() {
+                let bak = PathBuf::from(format!("{}.bak", new_key_path.display()));
+                std::fs::rename(&new_key_path, &bak)
+                    .with_context(|| format!("Failed to rename old key to {}", bak.display()))?;
+                let pub_path = PathBuf::from(format!("{}.pub", new_key_path.display()));
+                if pub_path.exists() {
+                    let pub_bak = PathBuf::from(format!("{}.pub.bak", new_key_path.display()));
+                    std::fs::rename(&pub_path, &pub_bak).ok();
+                }
+                println!("  Renamed old key to {}", bak.display());
+            }
+
+            generate_ssh_key(&new_key_path, &format!("borg-{client_name}-{}", repo.name)).await?;
+            repo.ssh_key = new_key_path.display().to_string();
+            repos_with_new_keys.push(i);
+        }
+    }
+
     config.save(config_path)?;
     println!("\nConfig updated: {}", config_path.display());
+
+    if !repos_with_new_keys.is_empty() {
+        println!("\nAdd the following entries to the backup server's authorized_keys:");
+        for i in repos_with_new_keys {
+            print_repo_key_instructions(&client_name, &config.clients[client_idx].repos[i]);
+        }
+    }
 
     Ok(())
 }
@@ -383,7 +430,9 @@ async fn run_client_wizard() -> Result<()> {
         sources,
         compression: "auto,zstd".to_string(),
         exclude_patterns: vec!["sh:/home/*/.cache".to_string()],
+        exclude_patterns_from: vec![],
         exclude_if_present: vec![],
+        borg_filter: None,
         optional: false,
         retention: None,
     }];
@@ -397,7 +446,9 @@ async fn run_client_wizard() -> Result<()> {
             sources: offsite_sources,
             compression: "auto,zstd".to_string(),
             exclude_patterns: vec![],
+            exclude_patterns_from: vec![],
             exclude_if_present: vec![],
+            borg_filter: None,
             optional: true,
             retention: None,
         });
@@ -542,6 +593,11 @@ async fn run_management_wizard() -> Result<()> {
         .interact_text()
         .context("Input failed")?;
 
+    // Set up ssh dir before client collection so per-client keys can be generated inline
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+    let ssh_dir = home.join(".ssh");
+    std::fs::create_dir_all(&ssh_dir).context("Failed to create ~/.ssh")?;
+
     // Collect clients
     let mut clients: Vec<ClientConfig> = vec![];
     println!("\nEnter client names (empty line to finish):");
@@ -581,30 +637,43 @@ async fn run_management_wizard() -> Result<()> {
             None
         };
 
+        // Generate a dedicated SSH key for each repo of this client
+        let main_key = ssh_dir.join(format!("borg_{name}_main_ed25519"));
+        println!("\n  Generating SSH key for {name}/main...");
+        generate_ssh_key(&main_key, &format!("borg-{name}-main")).await?;
+
         let server_base = format!("ssh://borgmgmt@{server_host}");
         let mut repos = vec![RepoConfig {
             name: "main".to_string(),
             path: format!("{server_base}/backup/repos/{name}"),
-            ssh_key: expand_tilde("~/.ssh/borg_mgmt_ed25519").display().to_string(),
+            ssh_key: main_key.display().to_string(),
             passphrase_file: pass_main,
             sources: vec![],
             compression: "auto,zstd".to_string(),
             exclude_patterns: vec![],
+            exclude_patterns_from: vec![],
             exclude_if_present: vec![],
+            borg_filter: None,
             optional: false,
             retention: None,
         }];
 
         if let Some(pass) = offsite_pass {
+            let offsite_key = ssh_dir.join(format!("borg_{name}_offsite_ed25519"));
+            println!("  Generating SSH key for {name}/offsite...");
+            generate_ssh_key(&offsite_key, &format!("borg-{name}-offsite")).await?;
+
             repos.push(RepoConfig {
                 name: "offsite".to_string(),
                 path: format!("{server_base}/mnt/offsite/repos/{name}"),
-                ssh_key: expand_tilde("~/.ssh/borg_mgmt_ed25519").display().to_string(),
+                ssh_key: offsite_key.display().to_string(),
                 passphrase_file: pass,
                 sources: vec![],
                 compression: "auto,zstd".to_string(),
                 exclude_patterns: vec![],
+                exclude_patterns_from: vec![],
                 exclude_if_present: vec![],
+                borg_filter: None,
                 optional: true,
                 retention: None,
             });
@@ -640,15 +709,11 @@ async fn run_management_wizard() -> Result<()> {
         }
     }
 
-    // Generate SSH keys
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
-    let ssh_dir = home.join(".ssh");
-    std::fs::create_dir_all(&ssh_dir).context("Failed to create ~/.ssh")?;
-
+    // Generate management + admin SSH keys (per-client keys were generated in the loop above)
     let mgmt_key = ssh_dir.join("borg_mgmt_ed25519");
     let admin_key = ssh_dir.join("borg_mgmt_admin_ed25519");
 
-    println!("\nGenerating SSH keys...");
+    println!("\nGenerating management SSH keys...");
     generate_ssh_key(&mgmt_key, "borg-mgmt").await?;
     generate_ssh_key(&admin_key, "borg-mgmt-admin").await?;
 
@@ -684,23 +749,35 @@ async fn run_management_wizard() -> Result<()> {
     config.save(&config_path)?;
     println!("\nConfig written to: {}", config_path.display());
 
-    print_management_instructions(&server_host, &mgmt_key, &admin_key);
+    print_management_instructions(&server_host, &mgmt_key, &admin_key, &config.clients);
 
     Ok(())
 }
 
-fn print_management_instructions(server_host: &str, mgmt_key: &PathBuf, admin_key: &PathBuf) {
+fn print_management_instructions(server_host: &str, mgmt_key: &PathBuf, admin_key: &PathBuf, clients: &[ClientConfig]) {
     let mgmt_pub = read_pubkey(mgmt_key);
     let admin_pub = read_pubkey(admin_key);
 
     println!("\n{}", "=".repeat(60));
     println!("=== authorized_keys on the backup server ({server_host}) ===");
     println!("{}", "=".repeat(60));
+
+    // Per-client, per-repo entries with restricted paths
+    for client in clients {
+        for repo in &client.repos {
+            print_repo_key_instructions(&client.name, repo);
+        }
+    }
+
+    // Unrestricted admin key for shutdown / lockfile operations
+    println!("\n# Unrestricted admin key (for shutdown/lockfile management)");
+    println!("ssh-ed25519 {admin_pub} borg-mgmt-admin");
+
+    // Management key kept for backwards-compat / manual operations
+    println!("\n# Management key (broad repo access, for manual operations)");
     println!(
-        r#"command="borg serve --restrict-to-path /backup/repos --restrict-to-path /mnt/offsite/repos",restrict \
-  ssh-ed25519 {mgmt_pub} borg-mgmt"#
+        r#"command="borg serve --restrict-to-path /backup/repos --restrict-to-path /mnt/offsite/repos",restrict ssh-ed25519 {mgmt_pub} borg-mgmt"#
     );
-    println!("\nssh-ed25519 {admin_pub} borg-mgmt-admin");
 
     println!("\n{}", "=".repeat(60));
     println!("=== Next Steps ===");
@@ -745,6 +822,34 @@ fn generate_passphrase() -> String {
         write!(hex, "{:02x}", b).unwrap();
     }
     hex
+}
+
+/// Print the authorized_keys snippet for a single client repo key.
+fn print_repo_key_instructions(client_name: &str, repo: &RepoConfig) {
+    let key_path = PathBuf::from(&repo.ssh_key);
+    let pubkey = read_pubkey(&key_path);
+
+    // Extract filesystem path from ssh://user@host/path/to/repo
+    let repo_path = if let Some(scheme_end) = repo.path.find("://") {
+        let after_scheme = &repo.path[scheme_end + 3..];
+        if let Some(slash_idx) = after_scheme.find('/') {
+            after_scheme[slash_idx..].to_string()
+        } else {
+            repo.path.clone()
+        }
+    } else {
+        repo.path.clone()
+    };
+
+    let comment = format!("borg-{client_name}-{}", repo.name);
+
+    println!("\n{}", "=".repeat(60));
+    println!("=== authorized_keys entry: {client_name} / {} ===", repo.name);
+    println!("{}", "=".repeat(60));
+    println!(
+        r#"command="borg serve --restrict-to-path {repo_path}",restrict {pubkey} {comment}"#
+    );
+    println!("{}", "=".repeat(60));
 }
 
 fn read_pubkey(key_path: &PathBuf) -> String {

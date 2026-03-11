@@ -206,7 +206,9 @@ async fn run_create(
         &repo.sources,
         &repo.compression,
         &repo.exclude_patterns,
+        &repo.exclude_patterns_from,
         &repo.exclude_if_present,
+        repo.borg_filter.as_deref(),
     )
     .await
     .with_context(|| format!("borg create failed for {}", repo.path))?;

@@ -81,7 +81,11 @@ pub struct RepoConfig {
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
     #[serde(default)]
+    pub exclude_patterns_from: Vec<String>,
+    #[serde(default)]
     pub exclude_if_present: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub borg_filter: Option<String>,
     #[serde(default)]
     pub optional: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,7 +112,11 @@ impl<'de> Deserialize<'de> for RepoConfig {
             #[serde(default)]
             exclude_patterns: Vec<String>,
             #[serde(default)]
+            exclude_patterns_from: Vec<String>,
+            #[serde(default)]
             exclude_if_present: Vec<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            borg_filter: Option<String>,
             #[serde(default)]
             optional: bool,
             #[serde(default)]
@@ -123,7 +131,9 @@ impl<'de> Deserialize<'de> for RepoConfig {
             sources: helper.sources,
             compression: helper.compression,
             exclude_patterns: helper.exclude_patterns,
+            exclude_patterns_from: helper.exclude_patterns_from,
             exclude_if_present: helper.exclude_if_present,
+            borg_filter: helper.borg_filter,
             optional: helper.optional,
             retention: helper.retention,
         })
@@ -754,7 +764,9 @@ optional = true
             sources: vec!["/data".to_string()],
             compression: "auto,zstd".to_string(),
             exclude_patterns: vec![],
+            exclude_patterns_from: vec![],
             exclude_if_present: vec![],
+            borg_filter: None,
             optional: false,
             retention: None,
         }
