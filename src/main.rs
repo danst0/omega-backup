@@ -61,6 +61,10 @@ enum Commands {
     Init {
         /// Only initialize this client (default: all clients)
         client: Option<String>,
+
+        /// Install the shutdown watcher cron job on the server
+        #[arg(long)]
+        install_cron: bool,
     },
 
     /// Run a backup (client mode)
@@ -251,8 +255,8 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     match cli.command {
-        Commands::Init { ref client } => {
-            init::run_init(&config, client.as_deref(), dry_run, verbose).await?;
+        Commands::Init { ref client, install_cron } => {
+            init::run_init(&config, client.as_deref(), dry_run, verbose, install_cron).await?;
         }
 
         Commands::Backup { ref repo } => {

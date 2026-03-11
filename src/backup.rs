@@ -6,7 +6,7 @@ use crate::{
     borg::{self, BorgContext},
     config::{AppState, ClientConfig, Config, RepoConfig},
     ntfy::{self, NotificationSummary, NtfyConfig},
-    ssh::{self, SshConfig, count_lockfiles, remove_lockfile, set_lockfile, shutdown_server},
+    ssh::{self, SshConfig, count_lockfiles, remove_lockfile, set_lockfile},
     wol,
 };
 
@@ -155,16 +155,15 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
         }
     }
 
-    // Step 8: Check lockfiles and potentially shut down server
+    // Step 8: Report lockfile status (shutdown is handled by the server-side watcher)
     if !args.dry_run {
         match count_lockfiles(&ssh).await {
             Ok(0) => {
-                tracing::info!("No more lockfiles — shutting down server");
-                println!("All backups done — shutting down server.");
-                let _ = shutdown_server(&ssh).await;
+                tracing::info!("No more lockfiles — server will auto-shut down via watcher");
+                println!("All backups done — server will shut down automatically.");
             }
             Ok(n) => {
-                tracing::info!("{} lockfile(s) remaining — leaving server online", n);
+                tracing::info!("{} lockfile(s) remaining — server stays online", n);
                 println!("{n} backup(s) still in progress — server stays online.");
             }
             Err(e) => {

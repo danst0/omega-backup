@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// Run `omega-backup init [CLIENT]` — initialize borg repositories.
-pub async fn run_init(config: &Config, client_filter: Option<&str>, dry_run: bool, verbose: bool) -> Result<()> {
+pub async fn run_init(config: &Config, client_filter: Option<&str>, dry_run: bool, verbose: bool, install_cron: bool) -> Result<()> {
     let clients: Vec<&ClientConfig> = if let Some(name) = client_filter {
         let client = config
             .find_client(name)
@@ -49,6 +49,21 @@ pub async fn run_init(config: &Config, client_filter: Option<&str>, dry_run: boo
     }
 
     println!("\nInitialization complete. Server remains online — perform further operations as needed.");
+
+    if install_cron && !dry_run {
+        println!("\nInstalling shutdown watcher cron job on {}...", config.server.host);
+        ssh::install_shutdown_watcher(&ssh, config.server.shutdown_idle_minutes)
+            .await
+            .context("Failed to install shutdown watcher")?;
+        println!(
+            "Shutdown watcher installed (idle threshold: {} min). \
+             The server will auto-shut down after {} minutes with no active backups.",
+            config.server.shutdown_idle_minutes, config.server.shutdown_idle_minutes
+        );
+    } else if install_cron && dry_run {
+        println!("\n[dry-run] Would install shutdown watcher cron job on {}.", config.server.host);
+    }
+
     Ok(())
 }
 

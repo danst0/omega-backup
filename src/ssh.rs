@@ -216,11 +216,67 @@ pub async fn poll_until_reachable(
     }
 }
 
-/// Send shutdown command to the server.
-pub async fn shutdown_server(cfg: &SshConfig) -> Result<()> {
-    tracing::info!("Sending shutdown command to {}", cfg.host);
-    // We allow failure here since the connection may drop immediately
-    let _ = run_command(cfg, "sudo shutdown -h now").await;
+/// Install the omega-shutdown-watcher cron job on the server.
+///
+/// Writes `~/bin/omega-shutdown-watcher.sh` and registers a cron entry that
+/// runs it every minute. Idempotent — safe to call on repeated `init` runs.
+pub async fn install_shutdown_watcher(cfg: &SshConfig, idle_minutes: u64) -> Result<()> {
+    tracing::info!(
+        "Installing shutdown watcher on {} (idle threshold: {} min)",
+        cfg.host,
+        idle_minutes
+    );
+
+    let script = format!(
+        r#"#!/usr/bin/env bash
+# omega-shutdown-watcher: auto-shutdown after ${{1:-{idle}}} minutes of backup inactivity.
+# Managed by omega-backup — do not edit manually.
+set -euo pipefail
+
+IDLE_MINUTES="${{1:-{idle}}}"
+IDLE_SECS=$(( IDLE_MINUTES * 60 ))
+LOCK_PATTERN="/tmp/borg-lock-*"
+STATE_FILE="/tmp/omega-backup-last-active"
+
+lock_count=$(ls $LOCK_PATTERN 2>/dev/null | wc -l)
+if [ "$lock_count" -gt 0 ]; then
+    touch "$STATE_FILE"
+    exit 0
+fi
+
+# No active backups — bail if server was not woken by omega-backup
+[ -f "$STATE_FILE" ] || exit 0
+
+last_active=$(stat -c %Y "$STATE_FILE")
+now=$(date +%s)
+idle_secs=$(( now - last_active ))
+
+if [ "$idle_secs" -ge "$IDLE_SECS" ]; then
+    logger -t omega-backup "Idle for ${{idle_secs}}s (>= ${{IDLE_SECS}}s) — shutting down"
+    sudo shutdown -h now
+fi
+"#,
+        idle = idle_minutes,
+    );
+
+    // Write the script, make it executable
+    let write_script = format!(
+        "mkdir -p ~/bin && cat > ~/bin/omega-shutdown-watcher.sh << 'OMEGA_EOF'\n{script}OMEGA_EOF\nchmod +x ~/bin/omega-shutdown-watcher.sh"
+    );
+    run_command_strict(cfg, &write_script)
+        .await
+        .context("Failed to write shutdown watcher script on server")?;
+
+    // Install cron entry (idempotent: remove any previous omega-shutdown-watcher line first)
+    let cron_entry = format!("* * * * * $HOME/bin/omega-shutdown-watcher.sh {idle_minutes}");
+    let install_cron = format!(
+        r#"( crontab -l 2>/dev/null | grep -v 'omega-shutdown-watcher'; echo '{cron_entry}' ) | crontab -"#
+    );
+    run_command_strict(cfg, &install_cron)
+        .await
+        .context("Failed to install shutdown watcher cron entry")?;
+
+    tracing::info!("Shutdown watcher installed successfully");
     Ok(())
 }
 

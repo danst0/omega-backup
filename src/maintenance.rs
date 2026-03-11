@@ -6,7 +6,7 @@ use crate::{
     borg::{self, BorgContext, PrunePolicy},
     config::{AppState, ClientConfig, Config, RepoConfig},
     ntfy::{self, NotificationSummary, NtfyConfig},
-    ssh::{self, SshConfig, count_lockfiles, shutdown_server},
+    ssh::{self, SshConfig, count_lockfiles},
     wol,
 };
 
@@ -97,13 +97,12 @@ pub async fn run_maintenance(config: &Config, args: &MaintenanceArgs) -> Result<
         }
     }
 
-    // Step 5: Shutdown server — only if no backup lockfiles are present
+    // Step 5: Report lockfile status (shutdown is handled by the server-side watcher)
     if !args.dry_run {
         match count_lockfiles(&ssh).await {
             Ok(0) => {
-                tracing::info!("No active backup lockfiles — shutting down server");
-                println!("\nNo active backups — shutting down server.");
-                let _ = shutdown_server(&ssh).await;
+                tracing::info!("No active backup lockfiles — server will auto-shut down via watcher");
+                println!("\nNo active backups — server will shut down automatically.");
             }
             Ok(n) => {
                 tracing::info!("{} backup lockfile(s) present — leaving server online", n);
