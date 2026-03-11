@@ -14,6 +14,9 @@ Thank you for your interest in contributing! This document covers how to set up 
 git clone https://github.com/danst0/omega-backup.git
 cd omega-backup
 
+# Activate the local git hooks (runs cargo build + cargo test before every commit)
+git config core.hooksPath .githooks
+
 # Check that everything compiles
 cargo check
 

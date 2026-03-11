@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+echo "Running cargo build..."
+cargo build
+
+echo "Running cargo test..."
+cargo test

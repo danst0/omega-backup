@@ -631,6 +631,7 @@ admin_user = "admin"
                 admin_ssh_key: None,
                 poll_interval_secs: 20,
                 poll_timeout_secs: 120,
+                shutdown_idle_minutes: 10,
             },
             borg: BorgConfig {
                 binary: "/usr/bin/borg".to_string(),
@@ -741,6 +742,7 @@ optional = true
                 admin_ssh_key: None,
                 poll_interval_secs: 15,
                 poll_timeout_secs: 300,
+                shutdown_idle_minutes: 10,
             },
             borg: BorgConfig::default(),
             ntfy: None,
