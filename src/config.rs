@@ -24,6 +24,9 @@ pub struct ServerConfig {
     pub poll_interval_secs: u64,
     #[serde(default = "default_poll_timeout")]
     pub poll_timeout_secs: u64,
+    /// Minutes of backup inactivity before the server auto-shuts down (default: 10).
+    #[serde(default = "default_shutdown_idle_minutes")]
+    pub shutdown_idle_minutes: u64,
 }
 
 fn default_poll_interval() -> u64 {
@@ -32,6 +35,9 @@ fn default_poll_interval() -> u64 {
 fn default_poll_timeout() -> u64 {
     300
 }
+fn default_shutdown_idle_minutes() -> u64 {
+    10
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BorgConfig {
@@ -39,6 +45,8 @@ pub struct BorgConfig {
     pub binary: String,
     #[serde(default = "default_check_frequency")]
     pub check_frequency_days: u32,
+    #[serde(default = "default_lock_wait_secs")]
+    pub lock_wait_secs: u32,
 }
 
 fn default_borg_binary() -> String {
@@ -47,12 +55,16 @@ fn default_borg_binary() -> String {
 fn default_check_frequency() -> u32 {
     30
 }
+fn default_lock_wait_secs() -> u32 {
+    300
+}
 
 impl Default for BorgConfig {
     fn default() -> Self {
         Self {
             binary: default_borg_binary(),
             check_frequency_days: default_check_frequency(),
+            lock_wait_secs: default_lock_wait_secs(),
         }
     }
 }
@@ -623,6 +635,7 @@ admin_user = "admin"
             borg: BorgConfig {
                 binary: "/usr/bin/borg".to_string(),
                 check_frequency_days: 14,
+                lock_wait_secs: 300,
             },
             ntfy: Some(NtfyConfig {
                 url: "https://ntfy.example.com/topic".to_string(),

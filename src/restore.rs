@@ -54,7 +54,8 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
         .with_ssh_key(&repo.ssh_key)
         .with_binary(&config.borg.binary)
         .with_dry_run(args.dry_run)
-        .with_verbose(args.verbose);
+        .with_verbose(args.verbose)
+        .with_lock_wait(config.borg.lock_wait_secs);
 
     // Step 3: List archives
     println!("\nListing the last {} archive(s):", args.list_count);

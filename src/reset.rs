@@ -157,7 +157,8 @@ async fn reinit_repo(
         .with_ssh_key(ssh_key)
         .with_binary(&config.borg.binary)
         .with_dry_run(dry_run)
-        .with_verbose(verbose);
+        .with_verbose(verbose)
+        .with_lock_wait(config.borg.lock_wait_secs);
 
     println!("  Initializing repo: {}", repo_path);
     borg::init(&ctx, "repokey-blake2").await?;

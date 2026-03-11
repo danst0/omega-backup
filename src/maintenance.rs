@@ -155,7 +155,8 @@ async fn maintain_client(
             .with_ssh_key(&repo.ssh_key)
             .with_binary(&config.borg.binary)
             .with_dry_run(args.dry_run)
-            .with_verbose(args.verbose);
+            .with_verbose(args.verbose)
+            .with_lock_wait(config.borg.lock_wait_secs);
 
         let retention = repo.retention.as_ref().unwrap_or(&config.retention);
         let policy = PrunePolicy {

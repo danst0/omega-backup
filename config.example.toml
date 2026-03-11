@@ -4,10 +4,12 @@ mac = "AA:BB:CC:DD:EE:FF"
 admin_user = "admin"
 poll_interval_secs = 15    # default
 poll_timeout_secs = 300    # default
+shutdown_idle_minutes = 10 # shut down after this many minutes with no active backups
 
 [borg]
 binary = "borg"            # or "/opt/borg/borg" for a specific version
 check_frequency_days = 30  # full check only every N days (otherwise: quick repo-check)
+lock_wait_secs = 300       # seconds to wait for a repo lock before failing (default: 300)
 
 [ntfy]
 url = "https://ntfy.example.com/backup-topic"
@@ -25,7 +27,9 @@ passphrase_file = "/root/.borg-keys/client1-main.pass"
 sources = ["/data", "/etc", "/home"]
 compression = "auto,zstd"
 exclude_patterns = ["sh:/home/*/.cache"]
-exclude_if_present = [".nobackup"]   # skip directories containing this file
+exclude_patterns_from = []                 # paths to files containing exclude patterns (--exclude-from)
+exclude_if_present = [".nobackup"]         # skip directories containing this file
+borg_filter = "AME"                        # optional: filter file list output (A=added, M=modified, E=error)
 
 [[clients.repos]]
 name = "offsite"

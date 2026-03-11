@@ -29,6 +29,7 @@ pub struct BorgContext {
     pub binary: String,
     pub dry_run: bool,
     pub verbose: bool,
+    pub lock_wait_secs: u32,
 }
 
 impl BorgContext {
@@ -41,6 +42,7 @@ impl BorgContext {
             binary: "borg".to_string(),
             dry_run: false,
             verbose: false,
+            lock_wait_secs: 300,
         }
     }
 
@@ -66,6 +68,11 @@ impl BorgContext {
 
     pub fn with_verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
+        self
+    }
+
+    pub fn with_lock_wait(mut self, secs: u32) -> Self {
+        self.lock_wait_secs = secs;
         self
     }
 
@@ -320,6 +327,8 @@ pub async fn create(
 
     let mut args: Vec<String> = vec![
         "create".to_string(),
+        "--lock-wait".to_string(),
+        ctx.lock_wait_secs.to_string(),
         "--compression".to_string(),
         compression.to_string(),
         "--stats".to_string(),
@@ -441,6 +450,8 @@ pub async fn prune(ctx: &BorgContext, policy: &PrunePolicy) -> Result<()> {
 
     let mut args = vec![
         "prune".to_string(),
+        "--lock-wait".to_string(),
+        ctx.lock_wait_secs.to_string(),
         "--stats".to_string(),
         format!("--keep-daily={}", policy.keep_daily),
         format!("--keep-weekly={}", policy.keep_weekly),
@@ -467,8 +478,9 @@ pub async fn compact(ctx: &BorgContext) -> Result<()> {
         return Ok(());
     }
 
-    let args = &["compact", &ctx.repo];
-    ctx.run_checked(args).await?;
+    let lock_wait = ctx.lock_wait_secs.to_string();
+    let args = vec!["compact", "--lock-wait", &lock_wait, &ctx.repo];
+    ctx.run_checked(&args).await?;
     tracing::info!("Compacted repository: {}", ctx.repo);
     Ok(())
 }
@@ -480,7 +492,11 @@ pub async fn check(ctx: &BorgContext, full: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut args: Vec<String> = vec!["check".to_string()];
+    let mut args: Vec<String> = vec![
+        "check".to_string(),
+        "--lock-wait".to_string(),
+        ctx.lock_wait_secs.to_string(),
+    ];
     if full {
         args.push("--verify-data".to_string());
     }
