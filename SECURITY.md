@@ -45,4 +45,8 @@ To simplify multi-machine setups, `omega-backup` includes a custom mechanism to 
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in this project, please open a GitHub Issue or contact the maintainer directly.
+If you discover a security vulnerability in this project, please **do not** open a public GitHub issue. Instead, use GitHub's private security advisory feature:
+
+👉 [Report a vulnerability privately](https://github.com/danst0/omega-backup/security/advisories/new)
+
+You will receive a response within 7 days. Please include as much detail as possible: steps to reproduce, affected versions, and potential impact.
