@@ -72,6 +72,10 @@ enum Commands {
         /// Only back up this repo (e.g. --repo main, --repo offsite)
         #[arg(long)]
         repo: Option<String>,
+
+        /// Show borg's full output (file list, stats, warnings)
+        #[arg(short = 'v', long)]
+        verbose: bool,
     },
 
     /// Run maintenance: prune, compact, check (management mode)
@@ -259,8 +263,8 @@ async fn run(cli: Cli) -> Result<()> {
             init::run_init(&config, client.as_deref(), dry_run, verbose, install_cron).await?;
         }
 
-        Commands::Backup { ref repo } => {
-            let args = backup::BackupArgs { dry_run, verbose, repo: repo.clone() };
+        Commands::Backup { ref repo, verbose: local_verbose } => {
+            let args = backup::BackupArgs { dry_run, verbose: verbose || local_verbose, repo: repo.clone() };
             backup::run_backup(&config, &args).await?;
         }
 
