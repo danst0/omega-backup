@@ -301,3 +301,117 @@ pub async fn count_lockfiles(cfg: &SshConfig) -> Result<usize> {
     let count = out.stdout.trim().parse::<usize>().unwrap_or(0);
     Ok(count)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── SshConfig builder ────────────────────────────────────────
+
+    #[test]
+    fn test_ssh_config_new_defaults() {
+        let cfg = SshConfig::new("server.local", "admin");
+        assert_eq!(cfg.host, "server.local");
+        assert_eq!(cfg.user, "admin");
+        assert_eq!(cfg.port, 22);
+        assert_eq!(cfg.connect_timeout_secs, 5);
+        assert!(cfg.key_path.is_none());
+    }
+
+    #[test]
+    fn test_ssh_config_with_key() {
+        let cfg = SshConfig::new("host", "user").with_key("/home/user/.ssh/id_ed25519");
+        assert_eq!(cfg.key_path.as_deref(), Some("/home/user/.ssh/id_ed25519"));
+    }
+
+    #[test]
+    fn test_ssh_config_with_port() {
+        let cfg = SshConfig::new("host", "user").with_port(2222);
+        assert_eq!(cfg.port, 2222);
+    }
+
+    #[test]
+    fn test_ssh_config_with_timeout() {
+        let cfg = SshConfig::new("host", "user").with_timeout(60);
+        assert_eq!(cfg.connect_timeout_secs, 60);
+    }
+
+    #[test]
+    fn test_ssh_config_builder_chain() {
+        let cfg = SshConfig::new("host", "user")
+            .with_key("/tmp/key")
+            .with_port(2222)
+            .with_timeout(30);
+        assert_eq!(cfg.key_path.as_deref(), Some("/tmp/key"));
+        assert_eq!(cfg.port, 2222);
+        assert_eq!(cfg.connect_timeout_secs, 30);
+    }
+
+    // ── SshOutput::success ───────────────────────────────────────
+
+    #[test]
+    fn test_ssh_output_success_on_zero_exit_code() {
+        let out = SshOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        assert!(out.success());
+    }
+
+    #[test]
+    fn test_ssh_output_not_success_on_nonzero_exit_code() {
+        let out = SshOutput { exit_code: 1, stdout: String::new(), stderr: "error".into() };
+        assert!(!out.success());
+    }
+
+    #[test]
+    fn test_ssh_output_not_success_on_negative_exit_code() {
+        let out = SshOutput { exit_code: -1, stdout: String::new(), stderr: String::new() };
+        assert!(!out.success());
+    }
+
+    // ── SshConfig::base_args ─────────────────────────────────────
+
+    #[test]
+    fn test_base_args_ends_with_user_at_host() {
+        let cfg = SshConfig::new("myhost", "myuser");
+        let args = cfg.base_args();
+        assert_eq!(args.last().unwrap(), "myuser@myhost");
+    }
+
+    #[test]
+    fn test_base_args_includes_port() {
+        let cfg = SshConfig::new("host", "user").with_port(2222);
+        let args = cfg.base_args();
+        let idx = args.iter().position(|a| a == "-p").expect("-p flag not found");
+        assert_eq!(args[idx + 1], "2222");
+    }
+
+    #[test]
+    fn test_base_args_includes_connect_timeout() {
+        let cfg = SshConfig::new("host", "user").with_timeout(42);
+        let args = cfg.base_args();
+        assert!(args.iter().any(|a| a.contains("ConnectTimeout=42")),
+            "ConnectTimeout not found in args: {args:?}");
+    }
+
+    #[test]
+    fn test_base_args_includes_key_when_set() {
+        let cfg = SshConfig::new("host", "user").with_key("/path/to/key");
+        let args = cfg.base_args();
+        let idx = args.iter().position(|a| a == "-i").expect("-i flag not found");
+        assert_eq!(args[idx + 1], "/path/to/key");
+    }
+
+    #[test]
+    fn test_base_args_no_key_flag_without_key() {
+        let cfg = SshConfig::new("host", "user");
+        let args = cfg.base_args();
+        assert!(!args.contains(&"-i".to_string()));
+    }
+
+    #[test]
+    fn test_base_args_includes_batch_mode() {
+        let cfg = SshConfig::new("host", "user");
+        let args = cfg.base_args();
+        assert!(args.iter().any(|a| a.contains("BatchMode=yes")),
+            "BatchMode not found in args: {args:?}");
+    }
+}

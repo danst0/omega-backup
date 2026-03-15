@@ -149,14 +149,24 @@ impl BorgContext {
         match code {
             0 => Ok((stdout, stderr)),
             1 => {
-                tracing::warn!("borg warning: {}", stderr.trim());
+                if !stderr.is_empty() {
+                    eprintln!("borg warning: {}", stderr.trim());
+                }
                 Ok((stdout, stderr))
             }
-            _ => Err(BorgError::Failed {
-                exit_code: code,
-                stderr,
+            _ => {
+                if !stderr.is_empty() {
+                    eprintln!("{stderr}");
+                }
+                if !stdout.is_empty() {
+                    eprintln!("{stdout}");
+                }
+                Err(BorgError::Failed {
+                    exit_code: code,
+                    stderr,
+                }
+                .into())
             }
-            .into()),
         }
     }
 

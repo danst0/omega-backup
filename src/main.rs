@@ -87,6 +87,9 @@ enum Commands {
         /// Only maintain this repo (e.g. --repo offsite); default: all repos
         #[arg(long)]
         repo: Option<String>,
+
+        #[command(subcommand)]
+        action: Option<MaintainAction>,
     },
 
     /// Discover the MAC address of a host via ARP (host must be online)
@@ -165,6 +168,18 @@ enum ConfigAction {
     PushKey {
         /// Client name whose key to push
         client: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MaintainAction {
+    /// Run integrity check for a specific client (ignores check_frequency_days)
+    Check {
+        /// Client name (e.g. seneca)
+        client: String,
+        /// Only check this repo (e.g. --repo offsite); default: all repos
+        #[arg(long)]
+        repo: Option<String>,
     },
 }
 
@@ -268,9 +283,13 @@ async fn run(cli: Cli) -> Result<()> {
             backup::run_backup(&config, &args).await?;
         }
 
-        Commands::Maintain { skip_check, ref repo } => {
-            let args = maintenance::MaintenanceArgs { dry_run, verbose, skip_check, repo: repo.clone() };
-            maintenance::run_maintenance(&config, &args).await?;
+        Commands::Maintain { skip_check, ref repo, ref action } => {
+            if let Some(MaintainAction::Check { ref client, ref repo }) = action {
+                maintenance::run_check_only(&config, client, repo.as_deref(), dry_run, verbose).await?;
+            } else {
+                let args = maintenance::MaintenanceArgs { dry_run, verbose, skip_check, repo: repo.clone() };
+                maintenance::run_maintenance(&config, &args).await?;
+            }
         }
 
         Commands::RestoreTest { client, repo, list_count, extract, archive, paths } => {

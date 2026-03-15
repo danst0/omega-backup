@@ -158,3 +158,39 @@ async fn init_client(config: &Config, client: &ClientConfig, dry_run: bool, verb
 fn already_exists(err: &anyhow::Error) -> bool {
     format!("{err}").contains("A repository already exists")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_already_exists_matches_borg_message() {
+        let err = anyhow::anyhow!("A repository already exists at /mnt/backup/repo");
+        assert!(already_exists(&err));
+    }
+
+    #[test]
+    fn test_already_exists_does_not_match_other_errors() {
+        let err = anyhow::anyhow!("Permission denied: /mnt/backup/repo");
+        assert!(!already_exists(&err));
+    }
+
+    #[test]
+    fn test_already_exists_empty_message() {
+        let err = anyhow::anyhow!("");
+        assert!(!already_exists(&err));
+    }
+
+    #[test]
+    fn test_already_exists_partial_phrase_does_not_match() {
+        // "already exists" without "A repository" prefix
+        let err = anyhow::anyhow!("File already exists");
+        assert!(!already_exists(&err));
+    }
+
+    #[test]
+    fn test_already_exists_exact_phrase() {
+        let err = anyhow::anyhow!("A repository already exists");
+        assert!(already_exists(&err));
+    }
+}

@@ -60,3 +60,47 @@ fn format_timestamp(ts: Option<&str>) -> String {
         None => "-".to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_timestamp_none_returns_dash() {
+        assert_eq!(format_timestamp(None), "-");
+    }
+
+    #[test]
+    fn test_format_timestamp_valid_utc_rfc3339() {
+        let result = format_timestamp(Some("2026-01-15T10:30:00Z"));
+        // Local time may differ from UTC, but date portion is stable for reasonable offsets
+        assert!(result.contains("2026-01-15") || result.contains("2026-01-14"),
+            "unexpected result: {result}");
+        // Format must be "YYYY-MM-DD HH:MM"
+        assert_eq!(result.len(), "2026-01-15 10:30".len());
+    }
+
+    #[test]
+    fn test_format_timestamp_with_explicit_utc_offset() {
+        let result = format_timestamp(Some("2026-06-01T12:00:00+00:00"));
+        assert!(result.contains("2026-06-01") || result.contains("2026-05-31"),
+            "unexpected result: {result}");
+    }
+
+    #[test]
+    fn test_format_timestamp_garbage_falls_through() {
+        let garbage = "not-a-timestamp";
+        assert_eq!(format_timestamp(Some(garbage)), garbage);
+    }
+
+    #[test]
+    fn test_format_timestamp_empty_string_falls_through() {
+        assert_eq!(format_timestamp(Some("")), "");
+    }
+
+    #[test]
+    fn test_format_timestamp_partial_date_falls_through() {
+        let partial = "2026-01-15";
+        assert_eq!(format_timestamp(Some(partial)), partial);
+    }
+}

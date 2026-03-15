@@ -213,6 +213,130 @@ async fn maintain_client(
     Ok(lines)
 }
 
+/// Run integrity check only for a specific client (ignores check_frequency_days).
+pub async fn run_check_only(
+    config: &Config,
+    client_name: &str,
+    repo_filter: Option<&str>,
+    dry_run: bool,
+    verbose: bool,
+) -> Result<()> {
+    // Find client
+    let client = config
+        .clients
+        .iter()
+        .find(|c| c.name == client_name)
+        .with_context(|| format!("Client '{}' not found in config", client_name))?;
+
+    println!("Starting check for client: {}", client.name);
+
+    // Step 1: Wake-on-LAN
+    tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
+    wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
+
+    // Step 2: SSH poll
+    let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
+        .with_timeout(config.server.poll_interval_secs as u32);
+    if let Some(ref key) = config.server.admin_ssh_key {
+        ssh = ssh.with_key(key);
+    }
+
+    println!("Waiting for backup server to come online...");
+    ssh::poll_until_reachable(
+        &ssh,
+        Duration::from_secs(config.server.poll_interval_secs),
+        Duration::from_secs(config.server.poll_timeout_secs),
+    )
+    .await
+    .context("Backup server did not come online")?;
+
+    // Step 3: Determine repos
+    let repos: Vec<&RepoConfig> = match repo_filter {
+        Some(name) => {
+            let repo = client
+                .find_repo(name)
+                .with_context(|| format!("Repo '{}' not found for client '{}'", name, client.name))?;
+            vec![repo]
+        }
+        None => client.repos.iter().collect(),
+    };
+
+    let mut state = AppState::load().unwrap_or_default();
+    let mut overall_success = true;
+    let mut report_lines: Vec<String> = vec![];
+
+    // Step 4: Run full check on each repo
+    for repo in &repos {
+        let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
+            .with_ssh_key(&repo.ssh_key)
+            .with_binary(&config.borg.binary)
+            .with_dry_run(dry_run)
+            .with_verbose(verbose)
+            .with_lock_wait(config.borg.lock_wait_secs);
+
+        println!("  Checking {}/{}...", client.name, repo.name);
+        match borg::check(&ctx, true).await {
+            Ok(()) => {
+                let line = format!("{}/{}: check OK", client.name, repo.name);
+                println!("  {line}");
+                report_lines.push(line);
+
+                if !dry_run && repo.name == "main" {
+                    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                    let cs = state.client_mut(&client.name);
+                    cs.last_check_timestamp = Some(now);
+                    cs.integrity_status = Some("ok".to_string());
+                }
+            }
+            Err(e) => {
+                overall_success = false;
+                let line = format!("{}/{}: check FAILED: {e}", client.name, repo.name);
+                tracing::error!("{}", line);
+                println!("  {line}");
+                report_lines.push(line);
+            }
+        }
+    }
+
+    // Step 5: Save state
+    if !dry_run {
+        if let Err(e) = state.save() {
+            tracing::warn!("Failed to save state: {}", e);
+        }
+    }
+
+    // Step 6: ntfy
+    if let Some(ref ntfy_cfg) = config.ntfy {
+        let summary = ntfy::NotificationSummary {
+            client_name: client.name.clone(),
+            success: overall_success,
+            message: report_lines.join("\n"),
+            duration_secs: None,
+            dedup_bytes: None,
+        };
+        let ncfg = NtfyConfig {
+            url: &ntfy_cfg.url,
+            token: ntfy_cfg.token.as_deref(),
+            topic: &ntfy_cfg.topic,
+        };
+        if let Err(e) = ntfy::send_notification(&ncfg, &summary).await {
+            tracing::warn!("Failed to send ntfy notification: {}", e);
+        }
+    }
+
+    println!("\n=== Check Summary ===");
+    for line in &report_lines {
+        println!("  {line}");
+    }
+    println!("  Status: {}", if overall_success { "SUCCESS" } else { "FAILED" });
+
+    if !overall_success {
+        anyhow::bail!("Check had failures — see messages above");
+    }
+
+    Ok(())
+}
+
 pub(crate) fn should_run_check(state: &AppState, client_name: &str, frequency_days: u32) -> bool {
     let Some(cs) = state.client(client_name) else {
         return true; // Never checked — run check

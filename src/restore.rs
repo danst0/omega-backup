@@ -3,7 +3,7 @@ use chrono::Local;
 use std::time::Duration;
 
 use crate::{
-    borg::{self, BorgContext},
+    borg::{self, ArchiveInfo, BorgContext},
     config::Config,
     ssh::{self, SshConfig},
     wol,
@@ -17,6 +17,22 @@ pub struct RestoreArgs {
     pub extract: bool,
     pub archive: Option<String>,
     pub paths: Vec<String>,
+}
+
+/// Select an archive from a list, either by explicit name or defaulting to the most recent.
+pub fn select_archive<'a>(archives: &'a [ArchiveInfo], override_name: Option<&str>) -> Result<&'a ArchiveInfo> {
+    if archives.is_empty() {
+        anyhow::bail!("No archives available to select from");
+    }
+    if let Some(name) = override_name {
+        archives
+            .iter()
+            .find(|a| a.name == name)
+            .with_context(|| format!("Archive '{name}' not found"))
+    } else {
+        // Most recent is the last entry returned by `borg list --last`
+        Ok(archives.last().unwrap())
+    }
 }
 
 /// Run `omega-backup restore-test CLIENT` — Mode 3: Restore test workflow.
@@ -72,12 +88,9 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
     }
 
     // Determine which archive to use
-    let archive_name = if let Some(ref name) = args.archive {
-        name.clone()
-    } else {
-        // Use the most recent (last in list)
-        archives.last().unwrap().name.clone()
-    };
+    let selected = select_archive(&archives, args.archive.as_deref())
+        .with_context(|| format!("Failed to select archive for repo: {}", repo.path))?;
+    let archive_name = selected.name.clone();
 
     println!("\nUsing archive: {archive_name}");
 
@@ -113,4 +126,58 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
     println!("\nServer remains online — no automatic shutdown.");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::borg::ArchiveInfo;
+
+    fn make_archive(name: &str) -> ArchiveInfo {
+        ArchiveInfo { name: name.to_string(), date: "2026-01-01".to_string() }
+    }
+
+    #[test]
+    fn test_select_archive_by_name() {
+        let archives = vec![
+            make_archive("host-2026-01-01T00:00:00"),
+            make_archive("host-2026-01-02T00:00:00"),
+            make_archive("host-2026-01-03T00:00:00"),
+        ];
+        let selected = select_archive(&archives, Some("host-2026-01-02T00:00:00")).unwrap();
+        assert_eq!(selected.name, "host-2026-01-02T00:00:00");
+    }
+
+    #[test]
+    fn test_select_archive_defaults_to_last() {
+        let archives = vec![
+            make_archive("host-2026-01-01T00:00:00"),
+            make_archive("host-2026-01-02T00:00:00"),
+            make_archive("host-2026-01-03T00:00:00"),
+        ];
+        let selected = select_archive(&archives, None).unwrap();
+        assert_eq!(selected.name, "host-2026-01-03T00:00:00");
+    }
+
+    #[test]
+    fn test_select_archive_single_entry() {
+        let archives = vec![make_archive("only-archive")];
+        let selected = select_archive(&archives, None).unwrap();
+        assert_eq!(selected.name, "only-archive");
+    }
+
+    #[test]
+    fn test_select_archive_empty_list_errors() {
+        let result = select_archive(&[], None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No archives"));
+    }
+
+    #[test]
+    fn test_select_archive_unknown_name_errors() {
+        let archives = vec![make_archive("archive-a"), make_archive("archive-b")];
+        let result = select_archive(&archives, Some("archive-c"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("archive-c"));
+    }
 }

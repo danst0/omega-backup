@@ -24,7 +24,7 @@ pub struct ServerConfig {
     pub poll_interval_secs: u64,
     #[serde(default = "default_poll_timeout")]
     pub poll_timeout_secs: u64,
-    /// Minutes of backup inactivity before the server auto-shuts down (default: 10).
+    /// Minutes of backup inactivity before the server auto-shuts down (default: 90).
     #[serde(default = "default_shutdown_idle_minutes")]
     pub shutdown_idle_minutes: u64,
 }
@@ -36,7 +36,7 @@ fn default_poll_timeout() -> u64 {
     300
 }
 fn default_shutdown_idle_minutes() -> u64 {
-    10
+    90
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -631,7 +631,7 @@ admin_user = "admin"
                 admin_ssh_key: None,
                 poll_interval_secs: 20,
                 poll_timeout_secs: 120,
-                shutdown_idle_minutes: 10,
+                shutdown_idle_minutes: 90,
             },
             borg: BorgConfig {
                 binary: "/usr/bin/borg".to_string(),
@@ -742,7 +742,7 @@ optional = true
                 admin_ssh_key: None,
                 poll_interval_secs: 15,
                 poll_timeout_secs: 300,
-                shutdown_idle_minutes: 10,
+                shutdown_idle_minutes: 90,
             },
             borg: BorgConfig::default(),
             ntfy: None,

@@ -4,7 +4,7 @@ mac = "AA:BB:CC:DD:EE:FF"
 admin_user = "admin"
 poll_interval_secs = 15    # default
 poll_timeout_secs = 300    # default
-shutdown_idle_minutes = 10 # shut down after this many minutes with no active backups
+shutdown_idle_minutes = 90 # shut down after this many minutes with no active backups
 
 [borg]
 binary = "borg"            # or "/opt/borg/borg" for a specific version

@@ -555,3 +555,144 @@ fn base64_encode(data: &[u8]) -> String {
 fn base64_decode(s: &str) -> Result<Vec<u8>> {
     hex::decode(s).context("Failed to decode hex-encoded data")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Key derivation ───────────────────────────────────────────
+
+    #[test]
+    fn test_derive_session_key_is_deterministic() {
+        let k1 = derive_session_key("test-code");
+        let k2 = derive_session_key("test-code");
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn test_derive_session_key_different_inputs_differ() {
+        let k1 = derive_session_key("code-a");
+        let k2 = derive_session_key("code-b");
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn test_derive_session_key_is_32_bytes() {
+        let k = derive_session_key("any-code");
+        assert_eq!(k.len(), 32);
+    }
+
+    // ── Encrypt / Decrypt ────────────────────────────────────────
+
+    #[test]
+    fn test_encrypt_decrypt_round_trip() {
+        let key = derive_session_key("round-trip-test");
+        let plaintext = b"Hello, omega-backup!";
+        let ciphertext = encrypt(&key, plaintext).unwrap();
+        let recovered = decrypt(&key, &ciphertext).unwrap();
+        assert_eq!(recovered, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_round_trip_empty_plaintext() {
+        let key = derive_session_key("empty");
+        let ciphertext = encrypt(&key, b"").unwrap();
+        let recovered = decrypt(&key, &ciphertext).unwrap();
+        assert_eq!(recovered, b"");
+    }
+
+    #[test]
+    fn test_encrypt_produces_different_ciphertexts_due_to_random_nonce() {
+        let key = derive_session_key("nonce-test");
+        let c1 = encrypt(&key, b"same").unwrap();
+        let c2 = encrypt(&key, b"same").unwrap();
+        // Random nonce means ciphertexts differ with overwhelming probability
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn test_encrypt_output_includes_nonce_overhead() {
+        let key = derive_session_key("overhead");
+        let plaintext = b"data";
+        let ciphertext = encrypt(&key, plaintext).unwrap();
+        // 12-byte nonce + payload + 16-byte GCM tag
+        assert!(ciphertext.len() >= 12 + plaintext.len() + 16);
+    }
+
+    #[test]
+    fn test_decrypt_wrong_key_fails() {
+        let key1 = derive_session_key("key-one");
+        let key2 = derive_session_key("key-two");
+        let ciphertext = encrypt(&key1, b"secret").unwrap();
+        assert!(decrypt(&key2, &ciphertext).is_err());
+    }
+
+    #[test]
+    fn test_decrypt_too_short_fails() {
+        let key = derive_session_key("short");
+        let result = decrypt(&key, &[0u8; 11]); // needs at least 12-byte nonce
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too short"));
+    }
+
+    #[test]
+    fn test_decrypt_tampered_ciphertext_fails() {
+        let key = derive_session_key("tamper");
+        let mut ciphertext = encrypt(&key, b"important data").unwrap();
+        // Flip a byte in the ciphertext body (after the 12-byte nonce)
+        ciphertext[13] ^= 0xFF;
+        assert!(decrypt(&key, &ciphertext).is_err());
+    }
+
+    // ── Hex encoding helpers ─────────────────────────────────────
+
+    #[test]
+    fn test_hex_encode_decode_round_trip() {
+        let data = b"hello omega";
+        let encoded = base64_encode(data);
+        let decoded = base64_decode(&encoded).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_hex_encode_known_value() {
+        assert_eq!(base64_encode(b"\xde\xad\xbe\xef"), "deadbeef");
+    }
+
+    #[test]
+    fn test_hex_decode_known_value() {
+        assert_eq!(base64_decode("deadbeef").unwrap(), b"\xde\xad\xbe\xef");
+    }
+
+    #[test]
+    fn test_hex_decode_invalid_chars_fails() {
+        assert!(base64_decode("not-valid-hex!!").is_err());
+    }
+
+    #[test]
+    fn test_hex_decode_odd_length_fails() {
+        assert!(base64_decode("abc").is_err()); // odd length is invalid hex
+    }
+
+    #[test]
+    fn test_hex_encode_empty() {
+        assert_eq!(base64_encode(b""), "");
+    }
+
+    // ── One-time code generation ─────────────────────────────────
+
+    #[test]
+    fn test_generate_one_time_code_has_correct_length() {
+        let code = generate_one_time_code();
+        assert_eq!(code.len(), 8, "code should be 8 hex characters");
+    }
+
+    #[test]
+    fn test_generate_one_time_code_is_lowercase_hex() {
+        let code = generate_one_time_code();
+        assert!(
+            code.chars().all(|c| c.is_ascii_hexdigit()),
+            "code contains non-hex character: {code}"
+        );
+    }
+}
