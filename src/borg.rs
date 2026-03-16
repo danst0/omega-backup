@@ -272,14 +272,24 @@ impl BorgContext {
         match code {
             0 => Ok((stdout, stderr)),
             1 => {
-                tracing::warn!("borg warning: {}", stderr.trim());
+                if !stderr.is_empty() {
+                    eprintln!("borg warning: {}", stderr.trim());
+                }
                 Ok((stdout, stderr))
             }
-            _ => Err(BorgError::Failed {
-                exit_code: code,
-                stderr,
+            _ => {
+                if !stderr.is_empty() {
+                    eprintln!("{stderr}");
+                }
+                if !stdout.is_empty() {
+                    eprintln!("{stdout}");
+                }
+                Err(BorgError::Failed {
+                    exit_code: code,
+                    stderr,
+                }
+                .into())
             }
-            .into()),
         }
     }
 }
@@ -506,6 +516,7 @@ pub async fn check(ctx: &BorgContext, full: bool) -> Result<()> {
         "check".to_string(),
         "--lock-wait".to_string(),
         ctx.lock_wait_secs.to_string(),
+        "--progress".to_string(),
     ];
     if full {
         args.push("--verify-data".to_string());
@@ -513,7 +524,7 @@ pub async fn check(ctx: &BorgContext, full: bool) -> Result<()> {
     args.push(ctx.repo.clone());
 
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    ctx.run_checked(&args_ref).await?;
+    ctx.run_checked_streaming(&args_ref).await?;
     tracing::info!(
         "Checked repository: {} (full={})",
         ctx.repo,
