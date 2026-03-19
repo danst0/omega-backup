@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tokio::process::Command;
 
 use crate::config::{
-    BorgConfig, ClientConfig, Config, DistributionConfig, KeysConfig, NtfyConfig,
+    BorgConfig, ClientConfig, Config, DistributionConfig, KeysConfig, MachineRole, NtfyConfig,
     RepoConfig, RetentionConfig, ServerConfig, UpdateConfig, default_config_path, expand_tilde,
 };
 
@@ -166,6 +166,8 @@ async fn run_add_repo_wizard(config_path: &std::path::Path) -> Result<()> {
         borg_filter: None,
         optional,
         retention: None,
+        pre_create_commands: None,
+        post_create_commands: None,
     };
 
     client.repos.push(new_repo);
@@ -435,6 +437,8 @@ async fn run_client_wizard() -> Result<()> {
         borg_filter: None,
         optional: false,
         retention: None,
+        pre_create_commands: None,
+        post_create_commands: None,
     }];
 
     if use_offsite {
@@ -451,6 +455,8 @@ async fn run_client_wizard() -> Result<()> {
             borg_filter: None,
             optional: true,
             retention: None,
+            pre_create_commands: None,
+            post_create_commands: None,
         });
     }
 
@@ -467,6 +473,7 @@ async fn run_client_wizard() -> Result<()> {
     };
 
     let config = Config {
+        role: Some(MachineRole::Client),
         server: ServerConfig {
             host: server_host.clone(),
             mac: server_mac,
@@ -657,6 +664,8 @@ async fn run_management_wizard() -> Result<()> {
             borg_filter: None,
             optional: false,
             retention: None,
+            pre_create_commands: None,
+            post_create_commands: None,
         }];
 
         if let Some(pass) = offsite_pass {
@@ -677,6 +686,8 @@ async fn run_management_wizard() -> Result<()> {
                 borg_filter: None,
                 optional: true,
                 retention: None,
+                pre_create_commands: None,
+                post_create_commands: None,
             });
         }
 
@@ -725,6 +736,7 @@ async fn run_management_wizard() -> Result<()> {
     };
 
     let config = Config {
+        role: Some(MachineRole::Management),
         server: ServerConfig {
             host: server_host.clone(),
             mac: server_mac,

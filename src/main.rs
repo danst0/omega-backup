@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
-use config::{Config, default_config_path, default_log_dir};
+use config::{Config, MachineRole, default_config_path, default_log_dir};
 
 // ────────────────────────────────────────────────────────────────
 // CLI Definition
@@ -211,10 +211,12 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 Some(ConfigAction::Listen) => {
                     let config = load_config(&cli)?;
+                    config.require_role(MachineRole::Management)?;
                     distribute::run_listen(&config).await?;
                 }
                 Some(ConfigAction::Sync { client, host }) => {
                     let config = load_config(&cli)?;
+                    config.require_role(MachineRole::Client)?;
                     let client_name = client.clone().unwrap_or_else(|| {
                         config.clients.first().map(|c| c.name.clone()).unwrap_or_else(|| "client1".to_string())
                     });
@@ -279,11 +281,13 @@ async fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::Backup { ref repo, verbose: local_verbose } => {
+            config.require_role(MachineRole::Client)?;
             let args = backup::BackupArgs { dry_run, verbose: verbose || local_verbose, repo: repo.clone() };
             backup::run_backup(&config, &args).await?;
         }
 
         Commands::Maintain { skip_check, ref repo, ref action } => {
+            config.require_role(MachineRole::Management)?;
             if let Some(MaintainAction::Check { ref client, ref repo }) = action {
                 maintenance::run_check_only(&config, client, repo.as_deref(), dry_run, verbose).await?;
             } else {
@@ -293,6 +297,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::RestoreTest { client, repo, list_count, extract, archive, paths } => {
+            config.require_role(MachineRole::Management)?;
             let args = restore::RestoreArgs {
                 dry_run,
                 verbose,

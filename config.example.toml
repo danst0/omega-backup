@@ -1,3 +1,5 @@
+role = "client"  # "client" or "management" — controls which commands are allowed
+
 [server]
 host = "backupserver"
 mac = "AA:BB:CC:DD:EE:FF"
@@ -30,6 +32,12 @@ exclude_patterns = ["sh:/home/*/.cache"]
 exclude_patterns_from = []                 # paths to files containing exclude patterns (--exclude-from)
 exclude_if_present = [".nobackup"]         # skip directories containing this file
 borg_filter = "AME"                        # optional: filter file list output (A=added, M=modified, E=error)
+# pre_create_commands = [
+#   "docker exec mydb pg_dumpall -U postgres > /srv/docker/mydb/dump.sql",
+# ]
+# post_create_commands = [
+#   "rm -f /srv/docker/mydb/dump.sql",
+# ]
 
 [[clients.repos]]
 name = "offsite"

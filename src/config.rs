@@ -102,6 +102,10 @@ pub struct RepoConfig {
     pub optional: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<RetentionConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_create_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_create_commands: Option<Vec<String>>,
 }
 
 // Manual Deserialize for RepoConfig to handle missing `name` field (backward compat)
@@ -133,6 +137,10 @@ impl<'de> Deserialize<'de> for RepoConfig {
             optional: bool,
             #[serde(default)]
             retention: Option<RetentionConfig>,
+            #[serde(default)]
+            pre_create_commands: Option<Vec<String>>,
+            #[serde(default)]
+            post_create_commands: Option<Vec<String>>,
         }
         let helper = RepoConfigHelper::deserialize(deserializer)?;
         Ok(RepoConfig {
@@ -148,6 +156,8 @@ impl<'de> Deserialize<'de> for RepoConfig {
             borg_filter: helper.borg_filter,
             optional: helper.optional,
             retention: helper.retention,
+            pre_create_commands: helper.pre_create_commands,
+            post_create_commands: helper.post_create_commands,
         })
     }
 }
@@ -322,8 +332,26 @@ impl Default for RetentionConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MachineRole {
+    Client,
+    Management,
+}
+
+impl std::fmt::Display for MachineRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MachineRole::Client => write!(f, "client"),
+            MachineRole::Management => write!(f, "management"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    #[serde(default)]
+    pub role: Option<MachineRole>,
     pub server: ServerConfig,
     #[serde(default)]
     pub borg: BorgConfig,
@@ -386,6 +414,20 @@ impl Config {
             .map_err(|e| ConfigError::ParseError(e.to_string()))?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Returns an error if the machine role doesn't match the expected role.
+    pub fn require_role(&self, expected: MachineRole) -> Result<()> {
+        if let Some(role) = self.role {
+            if role != expected {
+                anyhow::bail!(
+                    "This command requires role '{}', but this machine is configured as '{}'.",
+                    expected,
+                    role,
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn load_from_default() -> Result<Self> {
@@ -624,6 +666,7 @@ admin_user = "admin"
         let path = dir.path().join("config.toml");
 
         let original = Config {
+            role: None,
             server: ServerConfig {
                 host: "backup.local".to_string(),
                 mac: "11:22:33:44:55:66".to_string(),
@@ -735,6 +778,7 @@ optional = true
     #[test]
     fn test_find_client() {
         let cfg = Config {
+            role: None,
             server: ServerConfig {
                 host: "s".to_string(),
                 mac: "AA:BB:CC:DD:EE:FF".to_string(),
@@ -784,6 +828,8 @@ optional = true
             borg_filter: None,
             optional: false,
             retention: None,
+            pre_create_commands: None,
+            post_create_commands: None,
         }
     }
 }

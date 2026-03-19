@@ -187,6 +187,40 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
     Ok(())
 }
 
+async fn run_hook_commands(label: &str, commands: &[String], abort_on_failure: bool) -> Result<()> {
+    for cmd_str in commands {
+        tracing::info!("[hook:{}] Running: {}", label, cmd_str);
+        let output = tokio::process::Command::new("sh")
+            .args(["-c", cmd_str])
+            .output()
+            .await
+            .with_context(|| format!("[hook:{}] Failed to spawn: {}", label, cmd_str))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for line in stdout.lines() {
+            tracing::info!("[hook:{}] stdout: {}", label, line);
+        }
+        for line in stderr.lines() {
+            tracing::info!("[hook:{}] stderr: {}", label, line);
+        }
+
+        let code = output.status.code().unwrap_or(-1);
+        if code != 0 {
+            let msg = format!(
+                "[hook:{}] Command exited with code {}: {}",
+                label, code, cmd_str
+            );
+            if abort_on_failure {
+                anyhow::bail!("{}", msg);
+            } else {
+                tracing::warn!("{}", msg);
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_create(
     config: &Config,
     client: &ClientConfig,
@@ -200,7 +234,15 @@ async fn run_create(
         .with_verbose(args.verbose)
         .with_lock_wait(config.borg.lock_wait_secs);
 
-    let result = borg::create(
+    if !args.dry_run {
+        if let Some(ref cmds) = repo.pre_create_commands {
+            run_hook_commands(&format!("pre:{}", repo.name), cmds, true)
+                .await
+                .with_context(|| format!("Pre-create hook failed for repo '{}'", repo.name))?;
+        }
+    }
+
+    let borg_result = borg::create(
         &ctx,
         &client.hostname,
         &repo.sources,
@@ -211,7 +253,13 @@ async fn run_create(
         repo.borg_filter.as_deref(),
     )
     .await
-    .with_context(|| format!("borg create failed for {}", repo.path))?;
+    .with_context(|| format!("borg create failed for {}", repo.path));
 
-    Ok(result)
+    if !args.dry_run {
+        if let Some(ref cmds) = repo.post_create_commands {
+            let _ = run_hook_commands(&format!("post:{}", repo.name), cmds, false).await;
+        }
+    }
+
+    borg_result
 }
