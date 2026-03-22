@@ -539,6 +539,20 @@ pub struct ArchiveInfo {
     pub date: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub path: String,
+    pub size: u64,
+    pub file_type: String,
+}
+
+impl FileEntry {
+    /// Returns true if this is a regular file (not a directory, symlink, etc.).
+    pub fn is_regular_file(&self) -> bool {
+        self.file_type == "-"
+    }
+}
+
 /// List recent archives.
 pub async fn list(ctx: &BorgContext, limit: usize) -> Result<Vec<ArchiveInfo>> {
     let last_str = limit.to_string();
@@ -555,6 +569,29 @@ pub async fn list(ctx: &BorgContext, limit: usize) -> Result<Vec<ArchiveInfo>> {
         .collect();
 
     Ok(archives)
+}
+
+/// List individual files inside an archive.
+pub async fn list_files(ctx: &BorgContext, archive: &str) -> Result<Vec<FileEntry>> {
+    let archive_ref = format!("{}::{}", ctx.repo, archive);
+    let args = &["list", "--json-lines", &archive_ref];
+    let (stdout, _) = ctx.run_checked(args).await?;
+
+    let mut entries = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            let path = val["path"].as_str().unwrap_or("").to_string();
+            let size = val["size"].as_u64().unwrap_or(0);
+            let file_type = val["type"].as_str().unwrap_or("").to_string();
+            entries.push(FileEntry { path, size, file_type });
+        }
+    }
+
+    Ok(entries)
 }
 
 /// Extract an archive or specific paths from it.

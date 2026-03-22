@@ -111,17 +111,13 @@ enum Commands {
         #[arg(long, default_value = "5")]
         list_count: usize,
 
-        /// Perform actual extraction (in addition to dry-run)
-        #[arg(long)]
-        extract: bool,
+        /// Number of random files to spot-check (default: 5)
+        #[arg(long, default_value = "5")]
+        sample_count: usize,
 
         /// Specific archive name to test (default: most recent)
         #[arg(long)]
         archive: Option<String>,
-
-        /// Only extract these paths (default: all)
-        #[arg(long = "path")]
-        paths: Vec<String>,
     },
 
     /// Show backup status (management mode)
@@ -296,16 +292,15 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
 
-        Commands::RestoreTest { client, repo, list_count, extract, archive, paths } => {
+        Commands::RestoreTest { client, repo, list_count, sample_count, archive } => {
             config.require_role(MachineRole::Management)?;
             let args = restore::RestoreArgs {
                 dry_run,
                 verbose,
                 repo,
                 list_count,
-                extract,
+                sample_count,
                 archive,
-                paths,
             };
             restore::run_restore_test(&config, &client, &args).await?;
         }

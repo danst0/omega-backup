@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::Local;
+use rand::seq::SliceRandom;
 use std::time::Duration;
 
 use crate::{
@@ -14,9 +14,8 @@ pub struct RestoreArgs {
     pub verbose: bool,
     pub repo: String,
     pub list_count: usize,
-    pub extract: bool,
+    pub sample_count: usize,
     pub archive: Option<String>,
-    pub paths: Vec<String>,
 }
 
 /// Select an archive from a list, either by explicit name or defaulting to the most recent.
@@ -35,7 +34,11 @@ pub fn select_archive<'a>(archives: &'a [ArchiveInfo], override_name: Option<&st
     }
 }
 
-/// Run `omega-backup restore-test CLIENT` — Mode 3: Restore test workflow.
+/// Run `omega-backup restore-test CLIENT` — Mode 3: Spot-check restore test.
+///
+/// Instead of downloading the entire archive, this picks N random files,
+/// runs `borg extract --dry-run` on just those files to verify integrity
+/// with minimal network traffic.
 pub async fn run_restore_test(config: &Config, client_name: &str, args: &RestoreArgs) -> Result<()> {
     let client = config
         .find_client(client_name)
@@ -94,35 +97,44 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
 
     println!("\nUsing archive: {archive_name}");
 
-    // Step 4: Dry-run extract to verify integrity
-    println!("Running dry-run extract (integrity check)...");
-    borg::extract(&ctx, &archive_name, &args.paths, None, true)
+    // Step 4: List files in the archive and pick random samples
+    println!("Listing files in archive...");
+    let all_files = borg::list_files(&ctx, &archive_name)
+        .await
+        .context("Failed to list files in archive")?;
+
+    let regular_files: Vec<_> = all_files.iter().filter(|f| f.is_regular_file()).collect();
+
+    if regular_files.is_empty() {
+        anyhow::bail!("No regular files found in archive: {archive_name}");
+    }
+
+    let sample_count = args.sample_count.min(regular_files.len());
+    let mut rng = rand::rng();
+    let mut sampled: Vec<_> = regular_files.clone();
+    sampled.shuffle(&mut rng);
+    let sampled = &sampled[..sample_count];
+
+    println!("\nSpot-checking {} random file(s) (out of {} total):", sample_count, regular_files.len());
+    for f in sampled {
+        println!("  {} ({} bytes)", f.path, f.size);
+    }
+
+    // Step 5: Dry-run extract only the sampled files
+    let paths: Vec<String> = sampled.iter().map(|f| f.path.clone()).collect();
+    println!("\nRunning dry-run extract on selected files...");
+    borg::extract(&ctx, &archive_name, &paths, None, true)
         .await
         .with_context(|| format!("Dry-run extract failed for archive: {archive_name}"))?;
-    println!("Dry-run extract: OK");
-
-    // Step 5: Optional real extract
-    if args.extract {
-        let timestamp = Local::now().format("%Y%m%dT%H%M%S").to_string();
-        let dest = format!("./restore-{timestamp}");
-        println!("\nExtracting to: {dest}");
-
-        borg::extract(&ctx, &archive_name, &args.paths, Some(&dest), false)
-            .await
-            .with_context(|| format!("Extract failed for archive: {archive_name}"))?;
-
-        println!("Extract complete → {dest}");
-    }
+    println!("Dry-run extract: OK — all {} file(s) passed integrity check", sample_count);
 
     println!("\n=== Restore Test Summary ===");
     println!("  Client: {}", client.name);
     println!("  Repo: {}", repo.name);
     println!("  Archive: {archive_name}");
-    println!("  Dry-run extract: PASSED");
-    if args.extract {
-        println!("  Full extract: DONE");
-    }
-    println!("  Status: SUCCESS");
+    println!("  Files in archive: {}", regular_files.len());
+    println!("  Files checked: {sample_count}");
+    println!("  Status: PASSED");
     println!("\nServer remains online — no automatic shutdown.");
 
     Ok(())
