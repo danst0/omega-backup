@@ -100,8 +100,8 @@ enum Commands {
 
     /// Run a restore test (management mode)
     RestoreTest {
-        /// Client name to test
-        client: String,
+        /// Client name to test (default: all clients)
+        client: Option<String>,
 
         /// Which repo to test (default: "main")
         #[arg(long, default_value = "main")]
@@ -302,7 +302,16 @@ async fn run(cli: Cli) -> Result<()> {
                 sample_count,
                 archive,
             };
-            restore::run_restore_test(&config, &client, &args).await?;
+            let clients: Vec<&str> = match &client {
+                Some(name) => vec![name.as_str()],
+                None => config.clients.iter().map(|c| c.name.as_str()).collect(),
+            };
+            for (i, name) in clients.iter().enumerate() {
+                if i > 0 {
+                    println!("\n{}\n", "─".repeat(60));
+                }
+                restore::run_restore_test(&config, name, &args).await?;
+            }
         }
 
         Commands::Status => {
