@@ -1,6 +1,6 @@
 [package]
 name = "omega-backup"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 
 [dependencies]
@@ -27,7 +27,9 @@ hex              = "0.4"
 self_update      = { version = "0.41", default-features = false, features = ["rustls", "archive-tar", "compression-flate2"] }
 serde_json       = "1.0"
 dirs             = "5.0"
+futures          = "0.3"
 semver           = "1.0.27"
+hostname = "0.4.2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -571,6 +571,21 @@ pub async fn list(ctx: &BorgContext, limit: usize) -> Result<Vec<ArchiveInfo>> {
     Ok(archives)
 }
 
+/// Get the most recent archive with its timestamp.
+pub async fn list_latest(ctx: &BorgContext) -> Result<Option<ArchiveInfo>> {
+    let args = &["list", "--last", "1", "--format={archive}{TAB}{time}{NL}", &ctx.repo];
+    let (stdout, _) = ctx.run_checked(args).await?;
+
+    let line = stdout.lines().find(|l| !l.trim().is_empty());
+    Ok(line.map(|l| {
+        let parts: Vec<&str> = l.trim().splitn(2, '\t').collect();
+        ArchiveInfo {
+            name: parts[0].to_string(),
+            date: parts.get(1).unwrap_or(&"").to_string(),
+        }
+    }))
+}
+
 /// List individual files inside an archive.
 pub async fn list_files(ctx: &BorgContext, archive: &str) -> Result<Vec<FileEntry>> {
     let archive_ref = format!("{}::{}", ctx.repo, archive);

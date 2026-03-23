@@ -302,6 +302,19 @@ pub async fn count_lockfiles(cfg: &SshConfig) -> Result<usize> {
     Ok(count)
 }
 
+/// List hostnames that have active lockfiles on the remote server.
+pub async fn list_lockfile_names(cfg: &SshConfig) -> Result<Vec<String>> {
+    let out = run_command(cfg, "ls -1 /tmp/borg-lock-* 2>/dev/null").await
+        .context("Failed to list lockfiles")?;
+    let names: Vec<String> = out.stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| l.trim().strip_prefix("/tmp/borg-lock-"))
+        .map(|s| s.to_string())
+        .collect();
+    Ok(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
