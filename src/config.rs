@@ -337,6 +337,7 @@ impl Default for RetentionConfig {
 pub enum MachineRole {
     Client,
     Management,
+    Both,
 }
 
 impl std::fmt::Display for MachineRole {
@@ -344,6 +345,7 @@ impl std::fmt::Display for MachineRole {
         match self {
             MachineRole::Client => write!(f, "client"),
             MachineRole::Management => write!(f, "management"),
+            MachineRole::Both => write!(f, "both"),
         }
     }
 }
@@ -419,7 +421,8 @@ impl Config {
     /// Returns an error if the machine role doesn't match the expected role.
     pub fn require_role(&self, expected: MachineRole) -> Result<()> {
         if let Some(role) = self.role {
-            if role != expected {
+            let allowed = role == expected || role == MachineRole::Both;
+            if !allowed {
                 anyhow::bail!(
                     "This command requires role '{}', but this machine is configured as '{}'.",
                     expected,
@@ -428,6 +431,20 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// Returns true if the backup server is the local machine.
+    pub fn server_is_local(&self) -> bool {
+        let host = &self.server.host;
+        if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+            return true;
+        }
+        if let Ok(local) = hostname::get() {
+            if let Ok(local_str) = local.into_string() {
+                return local_str == *host;
+            }
+        }
+        false
     }
 
     pub fn load_from_default() -> Result<Self> {

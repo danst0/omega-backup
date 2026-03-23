@@ -25,25 +25,30 @@ pub async fn run_maintenance(config: &Config, args: &MaintenanceArgs) -> Result<
 
     println!("Starting maintenance run...");
 
-    // Step 1: Wake-on-LAN
-    tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
-    wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
-
-    // Step 2: SSH poll
+    // Build SSH config (used for WoL poll, lockfiles, and shutdown check)
     let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
         .with_timeout(config.server.poll_interval_secs as u32);
     if let Some(ref key) = config.server.admin_ssh_key {
         ssh = ssh.with_key(key);
     }
 
-    println!("Waiting for backup server to come online...");
-    ssh::poll_until_reachable(
-        &ssh,
-        Duration::from_secs(config.server.poll_interval_secs),
-        Duration::from_secs(config.server.poll_timeout_secs),
-    )
-    .await
-    .context("Backup server did not come online")?;
+    if config.server_is_local() {
+        tracing::info!("Server is local — skipping Wake-on-LAN and SSH poll");
+    } else {
+        // Step 1: Wake-on-LAN
+        tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
+        wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
+
+        // Step 2: SSH poll
+        println!("Waiting for backup server to come online...");
+        ssh::poll_until_reachable(
+            &ssh,
+            Duration::from_secs(config.server.poll_interval_secs),
+            Duration::from_secs(config.server.poll_timeout_secs),
+        )
+        .await
+        .context("Backup server did not come online")?;
+    }
 
     let mut state = AppState::load().unwrap_or_default();
     let mut overall_success = true;
@@ -230,25 +235,29 @@ pub async fn run_check_only(
 
     println!("Starting check for client: {}", client.name);
 
-    // Step 1: Wake-on-LAN
-    tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
-    wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
+    if config.server_is_local() {
+        tracing::info!("Server is local — skipping Wake-on-LAN and SSH poll");
+    } else {
+        // Step 1: Wake-on-LAN
+        tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
+        wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
 
-    // Step 2: SSH poll
-    let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
-        .with_timeout(config.server.poll_interval_secs as u32);
-    if let Some(ref key) = config.server.admin_ssh_key {
-        ssh = ssh.with_key(key);
+        // Step 2: SSH poll
+        let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
+            .with_timeout(config.server.poll_interval_secs as u32);
+        if let Some(ref key) = config.server.admin_ssh_key {
+            ssh = ssh.with_key(key);
+        }
+
+        println!("Waiting for backup server to come online...");
+        ssh::poll_until_reachable(
+            &ssh,
+            Duration::from_secs(config.server.poll_interval_secs),
+            Duration::from_secs(config.server.poll_timeout_secs),
+        )
+        .await
+        .context("Backup server did not come online")?;
     }
-
-    println!("Waiting for backup server to come online...");
-    ssh::poll_until_reachable(
-        &ssh,
-        Duration::from_secs(config.server.poll_interval_secs),
-        Duration::from_secs(config.server.poll_timeout_secs),
-    )
-    .await
-    .context("Backup server did not come online")?;
 
     // Step 3: Determine repos
     let repos: Vec<&RepoConfig> = match repo_filter {

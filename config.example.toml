@@ -1,4 +1,4 @@
-role = "client"  # "client" or "management" — controls which commands are allowed
+role = "client"  # "client", "management", or "both" — controls which commands are allowed
 
 [server]
 host = "backupserver"

@@ -22,8 +22,18 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
         anyhow::bail!("No clients configured. Run `omega-backup config` first.");
     }
 
-    // Assume this machine is the first (and only) client in its own config
-    let client = &config.clients[0];
+    // Find the client entry for this machine by matching hostname
+    let local_hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_default();
+
+    let client = config
+        .clients
+        .iter()
+        .find(|c| !c.hostname.is_empty() && c.hostname == local_hostname)
+        .or_else(|| config.clients.first())
+        .context("No client configured for this machine")?;
 
     if client.hostname.is_empty() {
         anyhow::bail!(
@@ -56,25 +66,30 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
 
     println!("Starting backup for client: {}", client.name);
 
-    // Step 1: Wake-on-LAN
-    tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
-    wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
-
-    // Step 2: SSH poll
+    // Build SSH config (used for WoL poll, lockfiles, and shutdown check)
     let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
         .with_timeout(10);
     if let Some(ref key) = config.server.admin_ssh_key {
         ssh = ssh.with_key(key);
     }
 
-    println!("Waiting for backup server to come online...");
-    ssh::poll_until_reachable(
-        &ssh,
-        Duration::from_secs(config.server.poll_interval_secs),
-        Duration::from_secs(config.server.poll_timeout_secs),
-    )
-    .await
-    .context("Backup server did not come online in time")?;
+    if config.server_is_local() {
+        tracing::info!("Server is local — skipping Wake-on-LAN and SSH poll");
+    } else {
+        // Step 1: Wake-on-LAN
+        tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
+        wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
+
+        // Step 2: SSH poll
+        println!("Waiting for backup server to come online...");
+        ssh::poll_until_reachable(
+            &ssh,
+            Duration::from_secs(config.server.poll_interval_secs),
+            Duration::from_secs(config.server.poll_timeout_secs),
+        )
+        .await
+        .context("Backup server did not come online in time")?;
+    }
 
     // Step 3: Set lockfile
     if !args.dry_run {

@@ -12,6 +12,7 @@ use crate::config::{
 enum Role {
     Client,
     Management,
+    Both,
 }
 
 /// Interactive config wizard entry point.
@@ -53,7 +54,11 @@ async fn run_existing_config_menu(config_path: &std::path::Path) -> Result<()> {
 
 /// Fresh setup wizard (no existing config).
 async fn run_fresh_wizard() -> Result<()> {
-    let role_items = vec!["client (runs backups)", "management (runs maintenance)"];
+    let role_items = vec![
+        "client (runs backups)",
+        "management (runs maintenance)",
+        "both (client + management on same machine)",
+    ];
     let role_idx = Select::new()
         .with_prompt("What role does this machine have?")
         .items(&role_items)
@@ -61,15 +66,17 @@ async fn run_fresh_wizard() -> Result<()> {
         .interact()
         .context("Selection failed")?;
 
-    let role = if role_idx == 0 {
-        Role::Client
-    } else {
-        Role::Management
+    let role = match role_idx {
+        0 => Role::Client,
+        1 => Role::Management,
+        2 => Role::Both,
+        _ => unreachable!(),
     };
 
     match role {
         Role::Client => run_client_wizard().await,
         Role::Management => run_management_wizard().await,
+        Role::Both => run_both_wizard().await,
     }
 }
 
@@ -798,6 +805,357 @@ fn print_management_instructions(server_host: &str, mgmt_key: &PathBuf, admin_ke
     println!("{}", "=".repeat(60));
     println!("  1. omega-backup config listen         # receive keys from clients");
     println!("  2. Receive passphrases out-of-band → store in ~/.borg-keys/");
+}
+
+// ────────────────────────────────────────────────────────────────
+// Both (client + management) wizard
+// ────────────────────────────────────────────────────────────────
+
+async fn run_both_wizard() -> Result<()> {
+    println!("\n=== Combined Client + Management Setup ===\n");
+
+    let hostname_default = get_hostname().await.unwrap_or_else(|| "client1".to_string());
+
+    // --- Local client info (like client wizard) ---
+
+    let client_name: String = Input::new()
+        .with_prompt("Local client name (used as identifier)")
+        .default(hostname_default.clone())
+        .interact_text()
+        .context("Input failed")?;
+
+    let hostname: String = Input::new()
+        .with_prompt("Hostname of this machine")
+        .default(hostname_default)
+        .interact_text()
+        .context("Input failed")?;
+
+    // --- Server info ---
+
+    let server_host: String = Input::new()
+        .with_prompt("Backup server hostname (use 'localhost' if this machine)")
+        .default("localhost".to_string())
+        .interact_text()
+        .context("Input failed")?;
+
+    let server_mac: String = if server_host == "localhost" || server_host == "127.0.0.1" {
+        Input::new()
+            .with_prompt("Backup server MAC address (can be empty for local server)")
+            .allow_empty(true)
+            .default("00:00:00:00:00:00".to_string())
+            .interact_text()
+            .context("Input failed")?
+    } else {
+        prompt_mac_address(&server_host).await?
+    };
+
+    let server_user: String = Input::new()
+        .with_prompt("Admin user on backup server")
+        .default("admin".to_string())
+        .interact_text()
+        .context("Input failed")?;
+
+    // --- Notifications ---
+
+    let ntfy_url: String = Input::new()
+        .with_prompt("ntfy URL (leave empty to skip)")
+        .allow_empty(true)
+        .interact_text()
+        .context("Input failed")?;
+
+    let ntfy_token: Option<String> = if !ntfy_url.is_empty() {
+        let tok: String = Input::new()
+            .with_prompt("ntfy token (leave empty if not needed)")
+            .allow_empty(true)
+            .interact_text()
+            .context("Input failed")?;
+        if tok.is_empty() { None } else { Some(tok) }
+    } else {
+        None
+    };
+
+    let ntfy_topic: String = if !ntfy_url.is_empty() {
+        Input::new()
+            .with_prompt("ntfy topic")
+            .default("omega-backup".to_string())
+            .interact_text()
+            .context("Input failed")?
+    } else {
+        String::new()
+    };
+
+    let github_repo: String = Input::new()
+        .with_prompt("GitHub repo URL for key backup (leave empty to skip)")
+        .allow_empty(true)
+        .interact_text()
+        .context("Input failed")?;
+
+    // --- Local client backup sources (like client wizard) ---
+
+    let sources_default = "/data /etc /home";
+    let sources_input: String = Input::new()
+        .with_prompt("Backup sources for local client (space-separated)")
+        .default(sources_default.to_string())
+        .interact_text()
+        .context("Input failed")?;
+    let sources: Vec<String> = sources_input.split_whitespace().map(|s| s.to_string()).collect();
+
+    let use_offsite = Confirm::new()
+        .with_prompt("Configure an offsite repo for local client?")
+        .default(false)
+        .interact()
+        .context("Confirm failed")?;
+
+    let offsite_sources: Vec<String> = if use_offsite {
+        let offsite_default = "/data/paperless /data/docker-compose /etc /home";
+        let input: String = Input::new()
+            .with_prompt("Offsite repo backup sources (space-separated)")
+            .default(offsite_default.to_string())
+            .interact_text()
+            .context("Input failed")?;
+        input.split_whitespace().map(|s| s.to_string()).collect()
+    } else {
+        vec![]
+    };
+
+    // --- SSH keys & passphrases for local client ---
+
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+    let ssh_dir = home.join(".ssh");
+    std::fs::create_dir_all(&ssh_dir).context("Failed to create ~/.ssh")?;
+
+    let borg_main_key = ssh_dir.join(format!("borg_{client_name}_main_ed25519"));
+    let borg_admin_key = ssh_dir.join(format!("borg_{client_name}_admin_ed25519"));
+
+    println!("\nGenerating SSH keys for local client...");
+    generate_ssh_key(&borg_main_key, &format!("borg-{client_name}-main")).await?;
+    generate_ssh_key(&borg_admin_key, &format!("borg-{client_name}-admin")).await?;
+
+    let borg_offsite_key = if use_offsite {
+        let key = ssh_dir.join(format!("borg_{client_name}_offsite_ed25519"));
+        generate_ssh_key(&key, &format!("borg-{client_name}-offsite")).await?;
+        Some(key)
+    } else {
+        None
+    };
+
+    let keys_dir = expand_tilde("~/.borg-keys");
+    std::fs::create_dir_all(&keys_dir).context("Failed to create ~/.borg-keys")?;
+    set_dir_permissions(&keys_dir, 0o700);
+
+    let pass_main_path = keys_dir.join(format!("{client_name}-main.pass"));
+    let pass_main = generate_passphrase();
+    std::fs::write(&pass_main_path, &pass_main)
+        .context("Failed to write main passphrase")?;
+    set_file_permissions(&pass_main_path, 0o600);
+    println!("Generated passphrase → {}", pass_main_path.display());
+
+    let pass_offsite_path = if use_offsite {
+        let p = keys_dir.join(format!("{client_name}-offsite.pass"));
+        let pass = generate_passphrase();
+        std::fs::write(&p, &pass).context("Failed to write offsite passphrase")?;
+        set_file_permissions(&p, 0o600);
+        println!("Generated offsite passphrase → {}", p.display());
+        Some(p)
+    } else {
+        None
+    };
+
+    // Build local client repos
+    let server_base = format!("ssh://borguser@{server_host}");
+    let mut local_repos = vec![RepoConfig {
+        name: "main".to_string(),
+        path: format!("{server_base}/backup/repos/{client_name}"),
+        ssh_key: borg_main_key.display().to_string(),
+        passphrase_file: pass_main_path.display().to_string(),
+        sources,
+        compression: "auto,zstd".to_string(),
+        exclude_patterns: vec!["sh:/home/*/.cache".to_string()],
+        exclude_patterns_from: vec![],
+        exclude_if_present: vec![],
+        borg_filter: None,
+        optional: false,
+        retention: None,
+        pre_create_commands: None,
+        post_create_commands: None,
+    }];
+
+    if use_offsite {
+        local_repos.push(RepoConfig {
+            name: "offsite".to_string(),
+            path: format!("{server_base}/mnt/offsite/repos/{client_name}"),
+            ssh_key: borg_offsite_key.as_ref().unwrap().display().to_string(),
+            passphrase_file: pass_offsite_path.as_ref().unwrap().display().to_string(),
+            sources: offsite_sources,
+            compression: "auto,zstd".to_string(),
+            exclude_patterns: vec![],
+            exclude_patterns_from: vec![],
+            exclude_if_present: vec![],
+            borg_filter: None,
+            optional: true,
+            retention: None,
+            pre_create_commands: None,
+            post_create_commands: None,
+        });
+    }
+
+    let mut clients = vec![ClientConfig {
+        name: client_name.clone(),
+        hostname: hostname.clone(),
+        repos: local_repos,
+    }];
+
+    // --- Additional remote clients (like management wizard) ---
+
+    let add_remote = Confirm::new()
+        .with_prompt("Add additional remote clients to manage?")
+        .default(false)
+        .interact()
+        .context("Confirm failed")?;
+
+    if add_remote {
+        println!("\nEnter remote client names (empty line to finish):");
+        loop {
+            let name: String = Input::new()
+                .with_prompt("Client name (empty to finish)")
+                .allow_empty(true)
+                .interact_text()
+                .context("Input failed")?;
+            if name.is_empty() {
+                break;
+            }
+
+            let pass_main_remote: String = Input::new()
+                .with_prompt(format!("  Path to main passphrase for {name}"))
+                .default(keys_dir.join(format!("{name}-main.pass")).display().to_string())
+                .interact_text()
+                .context("Input failed")?;
+
+            let has_offsite = Confirm::new()
+                .with_prompt(format!("  Does {name} have an offsite repo?"))
+                .default(false)
+                .interact()
+                .context("Confirm failed")?;
+
+            let offsite_pass: Option<String> = if has_offsite {
+                let p: String = Input::new()
+                    .with_prompt(format!("  Path to offsite passphrase for {name}"))
+                    .default(keys_dir.join(format!("{name}-offsite.pass")).display().to_string())
+                    .interact_text()
+                    .context("Input failed")?;
+                Some(p)
+            } else {
+                None
+            };
+
+            let main_key = ssh_dir.join(format!("borg_{name}_main_ed25519"));
+            println!("\n  Generating SSH key for {name}/main...");
+            generate_ssh_key(&main_key, &format!("borg-{name}-main")).await?;
+
+            let mgmt_base = format!("ssh://borgmgmt@{server_host}");
+            let mut repos = vec![RepoConfig {
+                name: "main".to_string(),
+                path: format!("{mgmt_base}/backup/repos/{name}"),
+                ssh_key: main_key.display().to_string(),
+                passphrase_file: pass_main_remote,
+                sources: vec![],
+                compression: "auto,zstd".to_string(),
+                exclude_patterns: vec![],
+                exclude_patterns_from: vec![],
+                exclude_if_present: vec![],
+                borg_filter: None,
+                optional: false,
+                retention: None,
+                pre_create_commands: None,
+                post_create_commands: None,
+            }];
+
+            if let Some(pass) = offsite_pass {
+                let offsite_key = ssh_dir.join(format!("borg_{name}_offsite_ed25519"));
+                println!("  Generating SSH key for {name}/offsite...");
+                generate_ssh_key(&offsite_key, &format!("borg-{name}-offsite")).await?;
+
+                repos.push(RepoConfig {
+                    name: "offsite".to_string(),
+                    path: format!("{mgmt_base}/mnt/offsite/repos/{name}"),
+                    ssh_key: offsite_key.display().to_string(),
+                    passphrase_file: pass,
+                    sources: vec![],
+                    compression: "auto,zstd".to_string(),
+                    exclude_patterns: vec![],
+                    exclude_patterns_from: vec![],
+                    exclude_if_present: vec![],
+                    borg_filter: None,
+                    optional: true,
+                    retention: None,
+                    pre_create_commands: None,
+                    post_create_commands: None,
+                });
+            }
+
+            clients.push(ClientConfig {
+                name,
+                hostname: String::new(),
+                repos,
+            });
+        }
+    }
+
+    // --- Management SSH keys ---
+
+    let mgmt_key = ssh_dir.join("borg_mgmt_ed25519");
+    let admin_key = ssh_dir.join("borg_mgmt_admin_ed25519");
+
+    println!("\nGenerating management SSH keys...");
+    generate_ssh_key(&mgmt_key, "borg-mgmt").await?;
+    generate_ssh_key(&admin_key, "borg-mgmt-admin").await?;
+
+    // --- Build and save config ---
+
+    let ntfy = if ntfy_url.is_empty() {
+        None
+    } else {
+        Some(NtfyConfig { url: ntfy_url, token: ntfy_token, topic: ntfy_topic })
+    };
+
+    let config = Config {
+        role: Some(MachineRole::Both),
+        server: ServerConfig {
+            host: server_host.clone(),
+            mac: server_mac,
+            admin_user: server_user,
+            admin_ssh_key: Some(admin_key.display().to_string()),
+            poll_interval_secs: 15,
+            poll_timeout_secs: 300,
+            shutdown_idle_minutes: 90,
+        },
+        borg: BorgConfig::default(),
+        ntfy,
+        clients,
+        keys: KeysConfig {
+            local_dir: "~/.borg-keys/".to_string(),
+            github_repo: if github_repo.is_empty() { None } else { Some(github_repo) },
+        },
+        distribution: DistributionConfig::default(),
+        retention: RetentionConfig::default(),
+        offsite_retention: None,
+        update: UpdateConfig::default(),
+    };
+
+    let config_path = default_config_path();
+    config.save(&config_path)?;
+    println!("\nConfig written to: {}", config_path.display());
+
+    print_management_instructions(&server_host, &mgmt_key, &admin_key, &config.clients);
+
+    println!("\n{}", "=".repeat(60));
+    println!("=== Dual-role Next Steps ===");
+    println!("{}", "=".repeat(60));
+    println!("  1. omega-backup init                  # create repos for all clients");
+    println!("  2. omega-backup backup                # run a backup (client mode)");
+    println!("  3. omega-backup maintain              # run maintenance (management mode)");
+
+    Ok(())
 }
 
 // ────────────────────────────────────────────────────────────────

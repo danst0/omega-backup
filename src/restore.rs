@@ -49,25 +49,29 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
 
     println!("Starting restore test for client: {} (repo: {})", client.name, repo.name);
 
-    // Step 1: Wake-on-LAN (server may be offline)
-    tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
-    wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
+    if config.server_is_local() {
+        tracing::info!("Server is local — skipping Wake-on-LAN and SSH poll");
+    } else {
+        // Step 1: Wake-on-LAN (server may be offline)
+        tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
+        wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
 
-    // Step 2: SSH poll
-    let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
-        .with_timeout(config.server.poll_interval_secs as u32);
-    if let Some(ref key) = config.server.admin_ssh_key {
-        ssh = ssh.with_key(key);
+        // Step 2: SSH poll
+        let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
+            .with_timeout(config.server.poll_interval_secs as u32);
+        if let Some(ref key) = config.server.admin_ssh_key {
+            ssh = ssh.with_key(key);
+        }
+
+        println!("Waiting for backup server to come online...");
+        ssh::poll_until_reachable(
+            &ssh,
+            Duration::from_secs(config.server.poll_interval_secs),
+            Duration::from_secs(config.server.poll_timeout_secs),
+        )
+        .await
+        .context("Backup server did not come online")?;
     }
-
-    println!("Waiting for backup server to come online...");
-    ssh::poll_until_reachable(
-        &ssh,
-        Duration::from_secs(config.server.poll_interval_secs),
-        Duration::from_secs(config.server.poll_timeout_secs),
-    )
-    .await
-    .context("Backup server did not come online")?;
 
     let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
         .with_ssh_key(&repo.ssh_key)

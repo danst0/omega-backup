@@ -1,9 +1,11 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDateTime};
 use std::collections::HashSet;
+use std::time::Duration;
 use crate::borg::{self, BorgContext};
 use crate::config::{AppState, Config, ClientState};
 use crate::ssh::{self, SshConfig};
+use crate::wol;
 
 pub async fn run_status(config: &Config) -> Result<()> {
     let state = AppState::load()?;
@@ -24,7 +26,21 @@ pub async fn run_status(config: &Config) -> Result<()> {
         ssh_cfg = ssh_cfg.with_key(key);
     }
 
-    let server_online = ssh::is_reachable(&ssh_cfg).await;
+    // Wake server and wait for SSH
+    println!("Waking backup server...");
+    wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
+
+    let server_online = match ssh::poll_until_reachable(
+        &ssh_cfg,
+        Duration::from_secs(config.server.poll_interval_secs),
+        Duration::from_secs(config.server.poll_timeout_secs),
+    ).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("Server did not become reachable: {}", e);
+            false
+        }
+    };
 
     // Gather live data from server if reachable
     let active_hostnames: HashSet<String> = if server_online {
