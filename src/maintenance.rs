@@ -235,9 +235,7 @@ pub async fn run_check_only(
 
     println!("Starting check for client: {}", client.name);
 
-    if config.server_is_local() {
-        tracing::info!("Server is local — skipping Wake-on-LAN and SSH poll");
-    } else {
+    if !config.server_is_local() {
         // Step 1: Wake-on-LAN
         tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
         wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
@@ -257,6 +255,8 @@ pub async fn run_check_only(
         )
         .await
         .context("Backup server did not come online")?;
+    } else {
+        tracing::info!("Server is local — skipping Wake-on-LAN and SSH poll");
     }
 
     // Step 3: Determine repos
