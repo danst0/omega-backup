@@ -1,0 +1,32 @@
+[package]
+name = "omega-backup-lib"
+version = "0.5.6"
+edition = "2021"
+
+[dependencies]
+serde            = { version = "1.0", features = ["derive"] }
+toml             = "0.8"
+tokio            = { version = "1", features = ["full"] }
+reqwest          = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono           = { version = "0.4", features = ["serde"] }
+dialoguer        = "0.11"
+anyhow           = "1.0"
+thiserror        = "2.0"
+tracing          = "0.1"
+mdns-sd          = "0.11"
+axum             = "0.8"
+aes-gcm          = "0.10"
+rand             = "0.9"
+indicatif        = "0.17"
+hkdf             = "0.12"
+sha2             = "0.10"
+hex              = "0.4"
+self_update      = { version = "0.41", default-features = false, features = ["rustls", "archive-tar", "compression-flate2"] }
+serde_json       = "1.0"
+dirs             = "5.0"
+futures          = "0.3"
+semver           = "1.0.27"
+hostname         = "0.4.2"
+
+[dev-dependencies]
+tempfile = "3"

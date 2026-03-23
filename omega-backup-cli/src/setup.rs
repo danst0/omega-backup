@@ -3,7 +3,7 @@ use dialoguer::{Confirm, Input, Select};
 use std::path::PathBuf;
 use tokio::process::Command;
 
-use crate::config::{
+use omega_backup_lib::config::{
     BorgConfig, ClientConfig, Config, DistributionConfig, KeysConfig, MachineRole, NtfyConfig,
     RepoConfig, RetentionConfig, ServerConfig, UpdateConfig, default_config_path, expand_tilde,
 };

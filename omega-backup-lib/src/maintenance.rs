@@ -346,7 +346,7 @@ pub async fn run_check_only(
     Ok(())
 }
 
-pub(crate) fn should_run_check(state: &AppState, client_name: &str, frequency_days: u32) -> bool {
+pub fn should_run_check(state: &AppState, client_name: &str, frequency_days: u32) -> bool {
     let Some(cs) = state.client(client_name) else {
         return true; // Never checked — run check
     };

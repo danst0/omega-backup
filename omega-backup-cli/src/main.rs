@@ -1,24 +1,13 @@
-mod backup;
-mod borg;
-mod config;
-mod distribute;
-mod init;
-mod maintenance;
-mod reset;
-mod ntfy;
-mod restore;
 mod setup;
-mod ssh;
-mod wol;
-mod status;
-mod check;
-mod update;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
+use omega_backup_lib::{
+    backup, borg, check, config, distribute, init, maintenance, reset, restore, status, update, wol,
+};
 use config::{Config, MachineRole, default_config_path, default_log_dir};
 
 // ────────────────────────────────────────────────────────────────
