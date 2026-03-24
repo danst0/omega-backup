@@ -4,8 +4,9 @@ use std::time::Duration;
 use crate::{
     borg::{self, BorgContext},
     config::{Config, RepoConfig},
+    log_line,
     ssh::{self, SshConfig},
-    wol,
+    wol, LogSender,
 };
 
 pub struct ResetArgs {
@@ -16,7 +17,7 @@ pub struct ResetArgs {
 }
 
 /// Run `omega-backup reset CLIENT` — delete and reinitialize borg repositories.
-pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs) -> Result<()> {
+pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs, log_tx: Option<LogSender>) -> Result<()> {
     let client = config
         .find_client(client_name)
         .with_context(|| format!("Client '{}' not found in config", client_name))?;
@@ -32,12 +33,12 @@ pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs) -> 
     };
 
     // Show what will be reset and confirm
-    println!("Will reset the following for client '{}':", client_name);
+    log_line(&log_tx, format!("Will reset the following for client '{}':", client_name));
     for repo in &repos {
-        println!("  - {} repo: {}", repo.name, repo.path);
+        log_line(&log_tx, format!("  - {} repo: {}", repo.name, repo.path));
     }
-    println!();
-    println!("This will PERMANENTLY DELETE these repositories and reinitialize them.");
+    log_line(&log_tx, "");
+    log_line(&log_tx, "This will PERMANENTLY DELETE these repositories and reinitialize them.");
 
     if !args.yes && !args.dry_run {
         use dialoguer::Confirm;
@@ -47,7 +48,7 @@ pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs) -> 
             .interact()
             .context("Failed to read confirmation")?;
         if !confirmed {
-            println!("Aborted.");
+            log_line(&log_tx, "Aborted.");
             return Ok(());
         }
     }
@@ -62,7 +63,7 @@ pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs) -> 
         ssh = ssh.with_key(key);
     }
 
-    println!("Waiting for backup server {} to come online...", config.server.host);
+    log_line(&log_tx, format!("Waiting for backup server {} to come online...", config.server.host));
     ssh::poll_until_reachable(
         &ssh,
         Duration::from_secs(config.server.poll_interval_secs),
@@ -79,11 +80,11 @@ pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs) -> 
             has_non_main = true;
         }
 
-        println!("\n--- Resetting {} repo ---", repo.name);
+        log_line(&log_tx, format!("\n--- Resetting {} repo ---", repo.name));
         let server_path = parse_repo_server_path(&repo.path)?;
         let key_path = keys_dir.join(format!("{}-{}.key", client_name, repo.name));
 
-        reset_repo(&ssh, &server_path, &key_path, args.dry_run).await?;
+        reset_repo(&ssh, &server_path, &key_path, args.dry_run, &log_tx).await?;
 
         reinit_repo(
             config,
@@ -93,19 +94,20 @@ pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs) -> 
             &key_path,
             args.dry_run,
             args.verbose,
+            &log_tx,
         )
         .await
         .with_context(|| format!("Failed to reinitialize {} repo", repo.name))?;
 
-        println!("  {} repo reset complete.", repo.name);
+        log_line(&log_tx, format!("  {} repo reset complete.", repo.name));
     }
 
-    println!("\nReset complete.");
+    log_line(&log_tx, "\nReset complete.");
 
     if has_non_main {
-        println!();
-        println!("Hint: Run `omega-backup config listen` on this machine, then");
-        println!("      `omega-backup config sync` on the client to update its passphrases.");
+        log_line(&log_tx, "");
+        log_line(&log_tx, "Hint: Run `omega-backup config listen` on this machine, then");
+        log_line(&log_tx, "      `omega-backup config sync` on the client to update its passphrases.");
     }
 
     Ok(())
@@ -117,13 +119,14 @@ async fn reset_repo(
     server_path: &str,
     local_key_path: &std::path::Path,
     dry_run: bool,
+    log_tx: &Option<LogSender>,
 ) -> Result<()> {
     // Delete remote repo
     let rm_cmd = format!("rm -rf {}", shell_escape(server_path));
     if dry_run {
-        println!("  [dry-run] Would run via SSH: {}", rm_cmd);
+        log_line(log_tx, format!("  [dry-run] Would run via SSH: {}", rm_cmd));
     } else {
-        println!("  Deleting remote repo: {}", server_path);
+        log_line(log_tx, format!("  Deleting remote repo: {}", server_path));
         ssh::run_command_strict(ssh, &rm_cmd)
             .await
             .with_context(|| format!("Failed to delete remote repo: {}", server_path))?;
@@ -132,9 +135,9 @@ async fn reset_repo(
     // Delete local key file
     if local_key_path.exists() {
         if dry_run {
-            println!("  [dry-run] Would delete local key: {}", local_key_path.display());
+            log_line(log_tx, format!("  [dry-run] Would delete local key: {}", local_key_path.display()));
         } else {
-            println!("  Deleting local key: {}", local_key_path.display());
+            log_line(log_tx, format!("  Deleting local key: {}", local_key_path.display()));
             std::fs::remove_file(local_key_path)
                 .with_context(|| format!("Failed to delete key file: {}", local_key_path.display()))?;
         }
@@ -152,6 +155,7 @@ async fn reinit_repo(
     key_export_path: &std::path::Path,
     dry_run: bool,
     verbose: bool,
+    log_tx: &Option<LogSender>,
 ) -> Result<()> {
     let ctx = BorgContext::new(repo_path, passphrase_file)
         .with_ssh_key(ssh_key)
@@ -160,11 +164,11 @@ async fn reinit_repo(
         .with_verbose(verbose)
         .with_lock_wait(config.borg.lock_wait_secs);
 
-    println!("  Initializing repo: {}", repo_path);
+    log_line(log_tx, format!("  Initializing repo: {}", repo_path));
     borg::init(&ctx, "repokey-blake2").await?;
 
     if !dry_run {
-        println!("  Exporting key → {}", key_export_path.display());
+        log_line(log_tx, format!("  Exporting key → {}", key_export_path.display()));
         borg::export_key(&ctx, &key_export_path.display().to_string()).await?;
     }
 

@@ -30,6 +30,7 @@ pub struct BorgContext {
     pub dry_run: bool,
     pub verbose: bool,
     pub lock_wait_secs: u32,
+    pub log_tx: Option<crate::LogSender>,
 }
 
 impl BorgContext {
@@ -43,6 +44,7 @@ impl BorgContext {
             dry_run: false,
             verbose: false,
             lock_wait_secs: 300,
+            log_tx: None,
         }
     }
 
@@ -73,6 +75,11 @@ impl BorgContext {
 
     pub fn with_lock_wait(mut self, secs: u32) -> Self {
         self.lock_wait_secs = secs;
+        self
+    }
+
+    pub fn with_log_tx(mut self, tx: Option<crate::LogSender>) -> Self {
+        self.log_tx = tx;
         self
     }
 
@@ -216,30 +223,42 @@ impl BorgContext {
                             (Some(r), None) => {
                                 let segment = pending[..r].to_string();
                                 pending.drain(..=r);
-                                eprint!("\r{}", segment);
-                                let _ = std::io::stderr().flush();
+                                if let Some(ref tx) = self.log_tx {
+                                    let _ = tx.send(segment);
+                                } else {
+                                    eprint!("\r{}", segment);
+                                    let _ = std::io::stderr().flush();
+                                }
                             }
                             (None, Some(n)) => {
                                 let line = pending[..n].to_string();
                                 pending.drain(..=n);
                                 stderr_all.push_str(&line);
                                 stderr_all.push('\n');
-                                if self.verbose {
+                                if let Some(ref tx) = self.log_tx {
+                                    let _ = tx.send(format!("{line}\n"));
+                                } else if self.verbose {
                                     eprintln!("\r{}", line);
                                 }
                             }
                             (Some(r), Some(n)) if r < n => {
                                 let segment = pending[..r].to_string();
                                 pending.drain(..=r);
-                                eprint!("\r{}", segment);
-                                let _ = std::io::stderr().flush();
+                                if let Some(ref tx) = self.log_tx {
+                                    let _ = tx.send(segment);
+                                } else {
+                                    eprint!("\r{}", segment);
+                                    let _ = std::io::stderr().flush();
+                                }
                             }
                             (_, Some(n)) => {
                                 let line = pending[..n].to_string();
                                 pending.drain(..=n);
                                 stderr_all.push_str(&line);
                                 stderr_all.push('\n');
-                                if self.verbose {
+                                if let Some(ref tx) = self.log_tx {
+                                    let _ = tx.send(format!("{line}\n"));
+                                } else if self.verbose {
                                     eprintln!("\r{}", line);
                                 }
                             }
@@ -255,9 +274,11 @@ impl BorgContext {
             stderr_all.push_str(&pending);
         }
 
-        // Clear the progress line
-        eprint!("\r{:width$}\r", "", width = 100);
-        let _ = std::io::stderr().flush();
+        // Clear the progress line (only needed for terminal output)
+        if self.log_tx.is_none() {
+            eprint!("\r{:width$}\r", "", width = 100);
+            let _ = std::io::stderr().flush();
+        }
 
         let status = child.wait().await.context("Failed to wait for borg process")?;
         let exit_code = status.code().unwrap_or(-1);

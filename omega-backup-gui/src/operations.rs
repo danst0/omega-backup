@@ -115,16 +115,46 @@ pub fn build_view(state: Rc<GuiState>, backend: BackendHandle) -> gtk::Box {
         .build();
     let backend_init = backend.clone();
     let init_combo_ref = init_combo.clone();
-    init_btn.connect_clicked(move |btn| {
-        btn.set_sensitive(false);
-        let selected = selected_string(&init_combo_ref);
-        let client = if selected == "All" {
-            None
-        } else {
-            Some(selected)
-        };
-        backend_init.send(BackendCommand::RunInit { client });
-    });
+    init_btn.connect_clicked(glib::clone!(
+        #[weak]
+        view,
+        move |btn| {
+            let selected = selected_string(&init_combo_ref);
+            let target = if selected == "All" {
+                "all clients".to_string()
+            } else {
+                format!("\"{selected}\"")
+            };
+            let backend_clone = backend_init.clone();
+            let client = if selected == "All" {
+                None
+            } else {
+                Some(selected)
+            };
+            let dialog = adw::AlertDialog::builder()
+                .heading("Initialize Repositories?")
+                .body(format!(
+                    "This will initialize borg repositories for {target}. Existing repos will not be overwritten."
+                ))
+                .build();
+            dialog.add_responses(&[("cancel", "Cancel"), ("init", "Initialize")]);
+            dialog.set_response_appearance("init", adw::ResponseAppearance::Suggested);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            let btn_clone = btn.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response == "init" {
+                    btn_clone.set_sensitive(false);
+                    backend_clone.send(BackendCommand::RunInit {
+                        client: client.clone(),
+                    });
+                }
+            });
+            if let Some(w) = view.root().and_then(|r| r.downcast::<gtk::Window>().ok()) {
+                dialog.present(Some(&w));
+            }
+        }
+    ));
     let init_btn_row = adw::ActionRow::builder().activatable(false).build();
     init_btn_row.add_suffix(&init_btn);
     init_group.add(&init_btn_row);

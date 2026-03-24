@@ -262,7 +262,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Commands::Init { ref client, install_cron } => {
-            init::run_init(&config, client.as_deref(), dry_run, verbose, install_cron).await?;
+            init::run_init(&config, client.as_deref(), dry_run, verbose, install_cron, None).await?;
         }
 
         Commands::Backup { ref repo, verbose: local_verbose } => {
@@ -274,10 +274,10 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Maintain { skip_check, ref repo, ref action } => {
             config.require_role(MachineRole::Management)?;
             if let Some(MaintainAction::Check { ref client, ref repo }) = action {
-                maintenance::run_check_only(&config, client, repo.as_deref(), dry_run, verbose).await?;
+                maintenance::run_check_only(&config, client, repo.as_deref(), dry_run, verbose, None).await?;
             } else {
                 let args = maintenance::MaintenanceArgs { dry_run, verbose, skip_check, repo: repo.clone() };
-                maintenance::run_maintenance(&config, &args).await?;
+                maintenance::run_maintenance(&config, &args, None).await?;
             }
         }
 
@@ -299,7 +299,7 @@ async fn run(cli: Cli) -> Result<()> {
                 if i > 0 {
                     println!("\n{}\n", "─".repeat(60));
                 }
-                restore::run_restore_test(&config, name, &args).await?;
+                restore::run_restore_test(&config, name, &args, None).await?;
             }
         }
 
@@ -317,7 +317,7 @@ async fn run(cli: Cli) -> Result<()> {
 
         Commands::Reset { ref client, ref repo, yes } => {
             let args = reset::ResetArgs { dry_run, verbose, repo: repo.clone(), yes };
-            reset::run_reset(&config, client, &args).await?;
+            reset::run_reset(&config, client, &args, None).await?;
         }
 
         Commands::Update => {

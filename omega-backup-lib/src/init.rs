@@ -4,12 +4,13 @@ use std::time::Duration;
 use crate::{
     borg::{self, BorgContext},
     config::{self, ClientConfig, Config},
+    log_line,
     ssh::{self, SshConfig},
-    wol,
+    wol, LogSender,
 };
 
 /// Run `omega-backup init [CLIENT]` — initialize borg repositories.
-pub async fn run_init(config: &Config, client_filter: Option<&str>, dry_run: bool, verbose: bool, install_cron: bool) -> Result<()> {
+pub async fn run_init(config: &Config, client_filter: Option<&str>, dry_run: bool, verbose: bool, install_cron: bool, log_tx: Option<LogSender>) -> Result<()> {
     let clients: Vec<&ClientConfig> = if let Some(name) = client_filter {
         let client = config
             .find_client(name)
@@ -33,7 +34,7 @@ pub async fn run_init(config: &Config, client_filter: Option<&str>, dry_run: boo
         ssh = ssh.with_key(key);
     }
 
-    println!("Waiting for backup server {} to come online...", config.server.host);
+    log_line(&log_tx, format!("Waiting for backup server {} to come online...", config.server.host));
     ssh::poll_until_reachable(
         &ssh,
         Duration::from_secs(config.server.poll_interval_secs),
@@ -44,24 +45,24 @@ pub async fn run_init(config: &Config, client_filter: Option<&str>, dry_run: boo
 
     // Process each client
     for client in &clients {
-        println!("\n--- Initializing client: {} ---", client.name);
-        init_client(config, client, dry_run, verbose).await?;
+        log_line(&log_tx, format!("\n--- Initializing client: {} ---", client.name));
+        init_client(config, client, dry_run, verbose, &log_tx).await?;
     }
 
-    println!("\nInitialization complete. Server remains online — perform further operations as needed.");
+    log_line(&log_tx, "\nInitialization complete. Server remains online — perform further operations as needed.");
 
     if install_cron && !dry_run {
-        println!("\nInstalling shutdown watcher cron job on {}...", config.server.host);
+        log_line(&log_tx, format!("\nInstalling shutdown watcher cron job on {}...", config.server.host));
         ssh::install_shutdown_watcher(&ssh, config.server.shutdown_idle_minutes)
             .await
             .context("Failed to install shutdown watcher")?;
-        println!(
+        log_line(&log_tx, format!(
             "Shutdown watcher installed (idle threshold: {} min). \
              The server will auto-shut down after {} minutes with no active backups.",
             config.server.shutdown_idle_minutes, config.server.shutdown_idle_minutes
-        );
+        ));
     } else if install_cron && dry_run {
-        println!("\n[dry-run] Would install shutdown watcher cron job on {}.", config.server.host);
+        log_line(&log_tx, format!("\n[dry-run] Would install shutdown watcher cron job on {}.", config.server.host));
     }
 
     Ok(())
@@ -107,11 +108,12 @@ fn ensure_passphrase_file(passphrase_file: &str) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
+    // This is only called during init, log to stdout (no log_tx available here)
     println!("  Generated passphrase → {}", path.display());
     Ok(())
 }
 
-async fn init_client(config: &Config, client: &ClientConfig, dry_run: bool, verbose: bool) -> Result<()> {
+async fn init_client(config: &Config, client: &ClientConfig, dry_run: bool, verbose: bool, log_tx: &Option<LogSender>) -> Result<()> {
     let keys_dir = config.keys_local_dir();
 
     for repo in &client.repos {
@@ -130,19 +132,19 @@ async fn init_client(config: &Config, client: &ClientConfig, dry_run: bool, verb
             .with_verbose(verbose)
             .with_lock_wait(config.borg.lock_wait_secs);
 
-        println!("  Initializing {} repo: {}", repo.name, repo.path);
+        log_line(log_tx, format!("  Initializing {} repo: {}", repo.name, repo.path));
         match borg::init(&ctx, "repokey-blake2").await {
             Ok(()) => {
                 let key_path = keys_dir.join(format!("{}-{}.key", client.name, repo.name));
                 if !dry_run {
-                    println!("  Exporting {} repo key → {}", repo.name, key_path.display());
+                    log_line(log_tx, format!("  Exporting {} repo key → {}", repo.name, key_path.display()));
                     borg::export_key(&ctx, &key_path.display().to_string())
                         .await
                         .with_context(|| format!("Failed to export key for {}/{}", client.name, repo.name))?;
                 }
             }
             Err(e) if already_exists(&e) => {
-                println!("  {} repo already exists, skipping.", repo.name);
+                log_line(log_tx, format!("  {} repo already exists, skipping.", repo.name));
             }
             Err(e) if repo.optional => {
                 tracing::warn!("{} repo init failed (optional, continuing): {}", repo.name, e);

@@ -5,9 +5,10 @@ use std::time::Duration;
 use crate::{
     borg::{self, BorgContext, PrunePolicy},
     config::{AppState, ClientConfig, Config, RepoConfig},
+    log_line,
     ntfy::{self, NotificationSummary, NtfyConfig},
     ssh::{self, SshConfig, count_lockfiles},
-    wol,
+    wol, LogSender,
 };
 
 pub struct MaintenanceArgs {
@@ -18,12 +19,12 @@ pub struct MaintenanceArgs {
 }
 
 /// Run `omega-backup maintain` — Mode 2: Management maintenance workflow.
-pub async fn run_maintenance(config: &Config, args: &MaintenanceArgs) -> Result<()> {
+pub async fn run_maintenance(config: &Config, args: &MaintenanceArgs, log_tx: Option<LogSender>) -> Result<()> {
     if config.clients.is_empty() {
         anyhow::bail!("No clients configured in config.");
     }
 
-    println!("Starting maintenance run...");
+    log_line(&log_tx, "Starting maintenance run...");
 
     // Build SSH config (used for WoL poll, lockfiles, and shutdown check)
     let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
@@ -40,7 +41,7 @@ pub async fn run_maintenance(config: &Config, args: &MaintenanceArgs) -> Result<
         wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
 
         // Step 2: SSH poll
-        println!("Waiting for backup server to come online...");
+        log_line(&log_tx, "Waiting for backup server to come online...");
         ssh::poll_until_reachable(
             &ssh,
             Duration::from_secs(config.server.poll_interval_secs),
@@ -56,12 +57,12 @@ pub async fn run_maintenance(config: &Config, args: &MaintenanceArgs) -> Result<
 
     // Step 3: Process each client
     for client in &config.clients {
-        println!("\n--- Maintaining client: {} ---", client.name);
-        let result = maintain_client(config, client, &mut state, args).await;
+        log_line(&log_tx, format!("\n--- Maintaining client: {} ---", client.name));
+        let result = maintain_client(config, client, &mut state, args, &log_tx).await;
         match result {
             Ok(lines) => {
                 for line in &lines {
-                    println!("  {line}");
+                    log_line(&log_tx, format!("  {line}"));
                 }
                 report_lines.extend(lines);
             }
@@ -69,7 +70,7 @@ pub async fn run_maintenance(config: &Config, args: &MaintenanceArgs) -> Result<
                 overall_success = false;
                 let msg = format!("FAILED for {}: {e}", client.name);
                 tracing::error!("{}", msg);
-                println!("  {msg}");
+                log_line(&log_tx, format!("  {msg}"));
                 report_lines.push(msg);
             }
         }
@@ -107,11 +108,11 @@ pub async fn run_maintenance(config: &Config, args: &MaintenanceArgs) -> Result<
         match count_lockfiles(&ssh).await {
             Ok(0) => {
                 tracing::info!("No active backup lockfiles — server will auto-shut down via watcher");
-                println!("\nNo active backups — server will shut down automatically.");
+                log_line(&log_tx, "\nNo active backups — server will shut down automatically.");
             }
             Ok(n) => {
                 tracing::info!("{} backup lockfile(s) present — leaving server online", n);
-                println!("\n{n} backup(s) still in progress — leaving server online.");
+                log_line(&log_tx, format!("\n{n} backup(s) still in progress — leaving server online."));
             }
             Err(e) => {
                 tracing::warn!("Failed to count lockfiles, leaving server online: {}", e);
@@ -120,11 +121,11 @@ pub async fn run_maintenance(config: &Config, args: &MaintenanceArgs) -> Result<
     }
 
     // Print summary
-    println!("\n=== Maintenance Summary ===");
+    log_line(&log_tx, "\n=== Maintenance Summary ===");
     for line in &report_lines {
-        println!("  {line}");
+        log_line(&log_tx, format!("  {line}"));
     }
-    println!("  Status: {}", if overall_success { "SUCCESS" } else { "FAILED" });
+    log_line(&log_tx, format!("  Status: {}", if overall_success { "SUCCESS" } else { "FAILED" }));
 
     if !overall_success {
         anyhow::bail!("Maintenance had failures — see messages above");
@@ -138,6 +139,7 @@ async fn maintain_client(
     client: &ClientConfig,
     state: &mut AppState,
     args: &MaintenanceArgs,
+    log_tx: &Option<LogSender>,
 ) -> Result<Vec<String>> {
     let mut lines = vec![];
 
@@ -160,7 +162,8 @@ async fn maintain_client(
             .with_binary(&config.borg.binary)
             .with_dry_run(args.dry_run)
             .with_verbose(args.verbose)
-            .with_lock_wait(config.borg.lock_wait_secs);
+            .with_lock_wait(config.borg.lock_wait_secs)
+            .with_log_tx(log_tx.clone());
 
         let retention = repo.retention.as_ref().unwrap_or(&config.retention);
         let policy = PrunePolicy {
@@ -225,6 +228,7 @@ pub async fn run_check_only(
     repo_filter: Option<&str>,
     dry_run: bool,
     verbose: bool,
+    log_tx: Option<LogSender>,
 ) -> Result<()> {
     // Find client
     let client = config
@@ -233,7 +237,7 @@ pub async fn run_check_only(
         .find(|c| c.name == client_name)
         .with_context(|| format!("Client '{}' not found in config", client_name))?;
 
-    println!("Starting check for client: {}", client.name);
+    log_line(&log_tx, format!("Starting check for client: {}", client.name));
 
     if !config.server_is_local() {
         // Step 1: Wake-on-LAN
@@ -247,7 +251,7 @@ pub async fn run_check_only(
             ssh = ssh.with_key(key);
         }
 
-        println!("Waiting for backup server to come online...");
+        log_line(&log_tx, "Waiting for backup server to come online...");
         ssh::poll_until_reachable(
             &ssh,
             Duration::from_secs(config.server.poll_interval_secs),
@@ -281,13 +285,14 @@ pub async fn run_check_only(
             .with_binary(&config.borg.binary)
             .with_dry_run(dry_run)
             .with_verbose(verbose)
-            .with_lock_wait(config.borg.lock_wait_secs);
+            .with_lock_wait(config.borg.lock_wait_secs)
+            .with_log_tx(log_tx.clone());
 
-        println!("  Checking {}/{}...", client.name, repo.name);
+        log_line(&log_tx, format!("  Checking {}/{}...", client.name, repo.name));
         match borg::check(&ctx, true).await {
             Ok(()) => {
                 let line = format!("{}/{}: check OK", client.name, repo.name);
-                println!("  {line}");
+                log_line(&log_tx, format!("  {line}"));
                 report_lines.push(line);
 
                 if !dry_run && repo.name == "main" {
@@ -301,7 +306,7 @@ pub async fn run_check_only(
                 overall_success = false;
                 let line = format!("{}/{}: check FAILED: {e}", client.name, repo.name);
                 tracing::error!("{}", line);
-                println!("  {line}");
+                log_line(&log_tx, format!("  {line}"));
                 report_lines.push(line);
             }
         }
@@ -333,11 +338,11 @@ pub async fn run_check_only(
         }
     }
 
-    println!("\n=== Check Summary ===");
+    log_line(&log_tx, "\n=== Check Summary ===");
     for line in &report_lines {
-        println!("  {line}");
+        log_line(&log_tx, format!("  {line}"));
     }
-    println!("  Status: {}", if overall_success { "SUCCESS" } else { "FAILED" });
+    log_line(&log_tx, format!("  Status: {}", if overall_success { "SUCCESS" } else { "FAILED" }));
 
     if !overall_success {
         anyhow::bail!("Check had failures — see messages above");

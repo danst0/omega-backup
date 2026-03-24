@@ -60,12 +60,10 @@ pub fn build_view() -> gtk::Box {
     view
 }
 
-pub fn get_buffer(view: &gtk::Box) -> gtk::TextBuffer {
-    fn walk(widget: &gtk::Widget) -> Option<gtk::TextBuffer> {
+pub fn get_text_view(view: &gtk::Box) -> gtk::TextView {
+    fn walk(widget: &gtk::Widget) -> Option<gtk::TextView> {
         if widget.widget_name() == BUFFER_ID {
-            if let Some(tv) = widget.downcast_ref::<gtk::TextView>() {
-                return Some(tv.buffer());
-            }
+            return widget.downcast_ref::<gtk::TextView>().cloned();
         }
         let mut child = widget.first_child();
         while let Some(c) = child {
@@ -79,15 +77,18 @@ pub fn get_buffer(view: &gtk::Box) -> gtk::TextBuffer {
     walk(view.upcast_ref()).expect("Log text view not found")
 }
 
-pub fn append(buffer: &gtk::TextBuffer, text: &str) {
+pub fn append(text_view: &gtk::TextView, text: &str) {
+    let buffer = text_view.buffer();
     let mut end = buffer.end_iter();
     buffer.insert(&mut end, text);
 
-    // Auto-scroll: place mark at end
+    // Auto-scroll: place mark at end and scroll to it
     let end = buffer.end_iter();
-    if let Some(mark) = buffer.mark("end-mark") {
+    let mark = if let Some(mark) = buffer.mark("end-mark") {
         buffer.move_mark(&mark, &end);
+        mark
     } else {
-        buffer.create_mark(Some("end-mark"), &end, false);
-    }
+        buffer.create_mark(Some("end-mark"), &end, false)
+    };
+    text_view.scroll_mark_onscreen(&mark);
 }

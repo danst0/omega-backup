@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use omega_backup_lib::config::{AppState, Config, default_config_path};
+use omega_backup_lib::config::{AppState, ClientState, Config, default_config_path};
 use omega_backup_lib::ssh::{self, SshConfig};
 use omega_backup_lib::{borg, init, maintenance, reset, restore, wol};
+use borg::BorgContext;
 
 // ── Command / Event enums ──────────────────────────────────────
 
@@ -125,8 +126,15 @@ async fn backend_loop(
             }
 
             BackendCommand::RefreshStatus => {
-                if let Ok(state) = AppState::load() {
-                    let _ = ui_tx.send(UiEvent::StateUpdated(state)).await;
+                match AppState::load() {
+                    Ok(state) => {
+                        let _ = ui_tx.send(UiEvent::StateUpdated(state)).await;
+                    }
+                    Err(e) => {
+                        let _ = ui_tx
+                            .send(UiEvent::Error(format!("Failed to load state: {e:#}")))
+                            .await;
+                    }
                 }
             }
 
@@ -150,6 +158,45 @@ async fn backend_loop(
                         borg_version,
                     })
                     .await;
+
+                // Query live archive data from borg repos and merge into state
+                if online {
+                    let mut state = AppState::load().unwrap_or_default();
+                    for client in &cfg.clients {
+                        if let Some(repo) = client.main_repo() {
+                            let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
+                                .with_ssh_key(&repo.ssh_key)
+                                .with_binary(&cfg.borg.binary)
+                                .with_lock_wait(cfg.borg.lock_wait_secs);
+                            if let Ok(Some(info)) = borg::list_latest(&ctx).await {
+                                let cs = state.client_mut(&client.name);
+                                // Parse borg timestamp "Mon, 2026-03-23 02:00:05"
+                                let date_part = info.date.split_once(", ")
+                                    .map(|(_, rest)| rest)
+                                    .unwrap_or(&info.date);
+                                if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(
+                                    date_part, "%Y-%m-%d %H:%M:%S",
+                                ) {
+                                    let ts = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
+                                    // Only update if live data is newer
+                                    let is_newer = cs.last_backup_timestamp.as_ref()
+                                        .map(|existing| ts > *existing)
+                                        .unwrap_or(true);
+                                    if is_newer {
+                                        cs.last_backup_timestamp = Some(ts);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Persist to state.json so CLI and future launches see it too
+                    if let Err(e) = state.save() {
+                        let _ = ui_tx
+                            .send(UiEvent::Error(format!("Failed to save state: {e:#}")))
+                            .await;
+                    }
+                    let _ = ui_tx.send(UiEvent::StateUpdated(state)).await;
+                }
             }
 
             BackendCommand::WakeServer => {
@@ -197,7 +244,8 @@ async fn backend_loop(
                     skip_check,
                     repo,
                 };
-                match maintenance::run_maintenance(cfg, &args).await {
+                let log_tx = spawn_log_forwarder(id, &ui_tx);
+                match maintenance::run_maintenance(cfg, &args, Some(log_tx)).await {
                     Ok(()) => {
                         let _ = ui_tx
                             .send(UiEvent::OperationCompleted {
@@ -237,7 +285,8 @@ async fn backend_loop(
                         ),
                     })
                     .await;
-                match init::run_init(cfg, client.as_deref(), false, true, false).await {
+                let log_tx = spawn_log_forwarder(id, &ui_tx);
+                match init::run_init(cfg, client.as_deref(), false, true, false, Some(log_tx)).await {
                     Ok(()) => {
                         let _ = ui_tx
                             .send(UiEvent::OperationCompleted {
@@ -284,7 +333,8 @@ async fn backend_loop(
                     sample_count,
                     archive: None,
                 };
-                match restore::run_restore_test(cfg, &client, &args).await {
+                let log_tx = spawn_log_forwarder(id, &ui_tx);
+                match restore::run_restore_test(cfg, &client, &args, Some(log_tx)).await {
                     Ok(()) => {
                         let _ = ui_tx
                             .send(UiEvent::OperationCompleted {
@@ -318,7 +368,8 @@ async fn backend_loop(
                         description: format!("Integrity check: {client}"),
                     })
                     .await;
-                match maintenance::run_check_only(cfg, &client, repo.as_deref(), false, true).await
+                let log_tx = spawn_log_forwarder(id, &ui_tx);
+                match maintenance::run_check_only(cfg, &client, repo.as_deref(), false, true, Some(log_tx)).await
                 {
                     Ok(()) => {
                         let _ = ui_tx
@@ -362,7 +413,8 @@ async fn backend_loop(
                     repo,
                     yes: true,
                 };
-                match reset::run_reset(cfg, &client, &args).await {
+                let log_tx = spawn_log_forwarder(id, &ui_tx);
+                match reset::run_reset(cfg, &client, &args, Some(log_tx)).await {
                     Ok(()) => {
                         let _ = ui_tx
                             .send(UiEvent::OperationCompleted {
@@ -385,6 +437,28 @@ async fn backend_loop(
             }
         }
     }
+}
+
+/// Create a log channel that forwards lines to the UI as OperationLog events.
+/// Returns the sender (to pass to workflow functions) and spawns a task that
+/// reads from the receiver and sends UiEvent::OperationLog.
+fn spawn_log_forwarder(
+    id: u64,
+    ui_tx: &async_channel::Sender<UiEvent>,
+) -> omega_backup_lib::LogSender {
+    let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let ui_tx = ui_tx.clone();
+    tokio::spawn(async move {
+        while let Some(line) = log_rx.recv().await {
+            let _ = ui_tx
+                .send(UiEvent::OperationLog {
+                    id,
+                    line,
+                })
+                .await;
+        }
+    });
+    log_tx
 }
 
 fn ssh_config_from(cfg: &Config) -> SshConfig {

@@ -5,8 +5,9 @@ use std::time::Duration;
 use crate::{
     borg::{self, ArchiveInfo, BorgContext},
     config::Config,
+    log_line,
     ssh::{self, SshConfig},
-    wol,
+    wol, LogSender,
 };
 
 pub struct RestoreArgs {
@@ -39,7 +40,7 @@ pub fn select_archive<'a>(archives: &'a [ArchiveInfo], override_name: Option<&st
 /// Instead of downloading the entire archive, this picks N random files,
 /// runs `borg extract --dry-run` on just those files to verify integrity
 /// with minimal network traffic.
-pub async fn run_restore_test(config: &Config, client_name: &str, args: &RestoreArgs) -> Result<()> {
+pub async fn run_restore_test(config: &Config, client_name: &str, args: &RestoreArgs, log_tx: Option<LogSender>) -> Result<()> {
     let client = config
         .find_client(client_name)
         .with_context(|| format!("Client '{}' not found in config", client_name))?;
@@ -47,7 +48,7 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
     let repo = client.find_repo(&args.repo)
         .with_context(|| format!("Repo '{}' not found for client '{}'", args.repo, client_name))?;
 
-    println!("Starting restore test for client: {} (repo: {})", client.name, repo.name);
+    log_line(&log_tx, format!("Starting restore test for client: {} (repo: {})", client.name, repo.name));
 
     if config.server_is_local() {
         tracing::info!("Server is local — skipping Wake-on-LAN and SSH poll");
@@ -63,7 +64,7 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
             ssh = ssh.with_key(key);
         }
 
-        println!("Waiting for backup server to come online...");
+        log_line(&log_tx, "Waiting for backup server to come online...");
         ssh::poll_until_reachable(
             &ssh,
             Duration::from_secs(config.server.poll_interval_secs),
@@ -81,7 +82,7 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
         .with_lock_wait(config.borg.lock_wait_secs);
 
     // Step 3: List archives
-    println!("\nListing the last {} archive(s):", args.list_count);
+    log_line(&log_tx, format!("\nListing the last {} archive(s):", args.list_count));
     let archives = borg::list(&ctx, args.list_count)
         .await
         .context("Failed to list archives")?;
@@ -91,7 +92,7 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
     }
 
     for (i, archive) in archives.iter().enumerate() {
-        println!("  [{}] {}", i, archive.name);
+        log_line(&log_tx, format!("  [{}] {}", i, archive.name));
     }
 
     // Determine which archive to use
@@ -99,10 +100,10 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
         .with_context(|| format!("Failed to select archive for repo: {}", repo.path))?;
     let archive_name = selected.name.clone();
 
-    println!("\nUsing archive: {archive_name}");
+    log_line(&log_tx, format!("\nUsing archive: {archive_name}"));
 
     // Step 4: List files in the archive and pick random samples
-    println!("Listing files in archive...");
+    log_line(&log_tx, "Listing files in archive...");
     let all_files = borg::list_files(&ctx, &archive_name)
         .await
         .context("Failed to list files in archive")?;
@@ -119,27 +120,27 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
     sampled.shuffle(&mut rng);
     let sampled = &sampled[..sample_count];
 
-    println!("\nSpot-checking {} random file(s) (out of {} total):", sample_count, regular_files.len());
+    log_line(&log_tx, format!("\nSpot-checking {} random file(s) (out of {} total):", sample_count, regular_files.len()));
     for f in sampled {
-        println!("  {} ({} bytes)", f.path, f.size);
+        log_line(&log_tx, format!("  {} ({} bytes)", f.path, f.size));
     }
 
     // Step 5: Dry-run extract only the sampled files
     let paths: Vec<String> = sampled.iter().map(|f| f.path.clone()).collect();
-    println!("\nRunning dry-run extract on selected files...");
+    log_line(&log_tx, "\nRunning dry-run extract on selected files...");
     borg::extract(&ctx, &archive_name, &paths, None, true)
         .await
         .with_context(|| format!("Dry-run extract failed for archive: {archive_name}"))?;
-    println!("Dry-run extract: OK — all {} file(s) passed integrity check", sample_count);
+    log_line(&log_tx, format!("Dry-run extract: OK — all {} file(s) passed integrity check", sample_count));
 
-    println!("\n=== Restore Test Summary ===");
-    println!("  Client: {}", client.name);
-    println!("  Repo: {}", repo.name);
-    println!("  Archive: {archive_name}");
-    println!("  Files in archive: {}", regular_files.len());
-    println!("  Files checked: {sample_count}");
-    println!("  Status: PASSED");
-    println!("\nServer remains online — no automatic shutdown.");
+    log_line(&log_tx, "\n=== Restore Test Summary ===");
+    log_line(&log_tx, format!("  Client: {}", client.name));
+    log_line(&log_tx, format!("  Repo: {}", repo.name));
+    log_line(&log_tx, format!("  Archive: {archive_name}"));
+    log_line(&log_tx, format!("  Files in archive: {}", regular_files.len()));
+    log_line(&log_tx, format!("  Files checked: {sample_count}"));
+    log_line(&log_tx, "  Status: PASSED");
+    log_line(&log_tx, "\nServer remains online — no automatic shutdown.");
 
     Ok(())
 }

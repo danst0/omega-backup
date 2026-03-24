@@ -87,9 +87,12 @@ fn populate(dashboard: &Rc<RefCell<DashboardInner>>, state: &GuiState) {
         return;
     }
 
+    let lockfiles = state.lockfiles.borrow();
+
     for client in &cfg.clients {
         let cs = app_state.client(&client.name);
-        let (dot_css, subtitle) = client_status_info(cs, client.repos.len());
+        let is_active = lockfiles.iter().any(|l| l == &client.hostname);
+        let (dot_css, subtitle) = client_status_info(cs, client.repos.len(), is_active);
 
         let dot = gtk::DrawingArea::builder()
             .width_request(12)
@@ -121,6 +124,15 @@ fn populate(dashboard: &Rc<RefCell<DashboardInner>>, state: &GuiState) {
             .build();
         row.add_prefix(&dot);
 
+        if is_active {
+            let active_label = gtk::Label::builder()
+                .label("ACTIVE")
+                .css_classes(["success"])
+                .valign(gtk::Align::Center)
+                .build();
+            row.add_suffix(&active_label);
+        }
+
         let repo_label = gtk::Label::builder()
             .label(&format!("{} repos", client.repos.len()))
             .css_classes(["dim-label"])
@@ -136,8 +148,12 @@ fn populate(dashboard: &Rc<RefCell<DashboardInner>>, state: &GuiState) {
 fn client_status_info(
     cs: Option<&omega_backup_lib::config::ClientState>,
     repo_count: usize,
+    is_active: bool,
 ) -> (&'static str, String) {
     let Some(cs) = cs else {
+        if is_active {
+            return ("green", "Backup running".into());
+        }
         return ("red", "Never backed up".into());
     };
 

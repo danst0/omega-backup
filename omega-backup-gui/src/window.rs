@@ -162,7 +162,7 @@ pub fn build_window(app: &adw::Application, backend: BackendHandle) -> adw::Appl
     // ── Wire up backend events via async channel ───────────────
     let ui_rx = backend.ui_rx.clone();
     let toast_ref = toast_overlay.clone();
-    let log_buffer = logs::get_buffer(&log_view);
+    let log_tv = logs::get_text_view(&log_view);
     let dashboard_ref = dashboard_view.clone();
     let server_ref = server_view.clone();
     let ops_ref = operations_view.clone();
@@ -189,14 +189,15 @@ pub fn build_window(app: &adw::Application, backend: BackendHandle) -> adw::Appl
                     *state.lockfiles.borrow_mut() = lockfiles;
                     *state.borg_version.borrow_mut() = borg_version;
                     server::refresh(&server_ref, &state);
+                    dashboard::refresh(&dashboard_ref, &state);
                 }
                 UiEvent::OperationStarted { id: _, description } => {
                     *state.operation_running.borrow_mut() = true;
                     operations::set_running(&ops_ref, true);
-                    logs::append(&log_buffer, &format!("--- {description} ---\n"));
+                    logs::append(&log_tv, &format!("--- {description} ---\n"));
                 }
                 UiEvent::OperationLog { id: _, line } => {
-                    logs::append(&log_buffer, &format!("{line}\n"));
+                    logs::append(&log_tv, &format!("{line}\n"));
                 }
                 UiEvent::OperationCompleted {
                     id: _,
@@ -205,7 +206,7 @@ pub fn build_window(app: &adw::Application, backend: BackendHandle) -> adw::Appl
                 } => {
                     *state.operation_running.borrow_mut() = false;
                     operations::set_running(&ops_ref, false);
-                    logs::append(&log_buffer, &format!("{summary}\n\n"));
+                    logs::append(&log_tv, &format!("{summary}\n\n"));
                     let toast = adw::Toast::new(&summary);
                     toast.set_timeout(5);
                     toast_ref.add_toast(toast);
@@ -216,7 +217,7 @@ pub fn build_window(app: &adw::Application, backend: BackendHandle) -> adw::Appl
                 }
                 UiEvent::Error(msg) => {
                     let toast = adw::Toast::new(&msg);
-                    toast.set_timeout(5);
+                    toast.set_timeout(10);
                     toast_ref.add_toast(toast);
                     tracing::error!("{msg}");
                 }
