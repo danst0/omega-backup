@@ -68,3 +68,9 @@ keep_daily = 7
 keep_weekly = 4
 keep_monthly = 12
 keep_yearly = 2
+
+[schedule]
+backup_max_age_days = 2          # flag client as stale if no backup within N days
+prune_frequency_days = 30        # recommended prune+compact interval
+check_frequency_days = 60        # full integrity check interval
+restore_test_frequency_days = 30 # recommended restore test interval

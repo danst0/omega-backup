@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::{
     borg::{self, ArchiveInfo, BorgContext},
-    config::Config,
+    config::{AppState, Config, OperationRecord, OperationResult, OperationType},
     log_line,
     ssh::{self, SshConfig},
     wol, LogSender,
@@ -132,6 +132,23 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
         .await
         .with_context(|| format!("Dry-run extract failed for archive: {archive_name}"))?;
     log_line(&log_tx, format!("Dry-run extract: OK — all {} file(s) passed integrity check", sample_count));
+
+    // Record restore-test result in state
+    if !args.dry_run {
+        let mut state = AppState::load().unwrap_or_default();
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        state.record_operation(client_name, &repo.name, OperationRecord {
+            operation: OperationType::RestoreTest,
+            timestamp: now,
+            duration_secs: None,
+            result: OperationResult::Success,
+            message: Some(format!("archive: {}, files checked: {}/{}", archive_name, sample_count, regular_files.len())),
+            stats: None,
+        });
+        if let Err(e) = state.save() {
+            tracing::warn!("Failed to save state: {}", e);
+        }
+    }
 
     log_line(&log_tx, "\n=== Restore Test Summary ===");
     log_line(&log_tx, format!("  Client: {}", client.name));

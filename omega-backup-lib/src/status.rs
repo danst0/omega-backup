@@ -3,7 +3,7 @@ use chrono::{DateTime, Local, NaiveDateTime};
 use std::collections::HashSet;
 use std::time::Duration;
 use crate::borg::{self, BorgContext};
-use crate::config::{AppState, Config, ClientState};
+use crate::config::{AppState, Config, OperationType};
 use crate::ssh::{self, SshConfig};
 use crate::wol;
 
@@ -93,51 +93,129 @@ pub async fn run_status(config: &Config) -> Result<()> {
     }
 
     println!(
-        "{:<20} | {:<19} | {:<10} | {:<10} | {:<19} | {:<10}",
-        "Client", "Last Backup", "Age", "Status", "Last Check", "Integrity"
+        "{:<25} | {:<19} | {:<12} | {:<10} | {:<12} | {:<12} | {:<10}",
+        "Client/Repo", "Last Backup", "Age", "Status", "Last Prune", "Last Check", "Integrity"
     );
-    println!("{}", "-".repeat(99));
+    println!("{}", "-".repeat(113));
 
     for client in &clients {
-        let client_state = state.client(&client.name).cloned().unwrap_or_default();
-        let archive_info = archive_map.get(&client.name).and_then(|v| v.as_ref());
         let is_active = active_hostnames.contains(&client.hostname);
-        print_client_row(&client.name, &client_state, archive_info, is_active);
+        let archive_info = archive_map.get(&client.name).and_then(|v| v.as_ref());
+
+        for repo in &client.repos {
+            let repo_state = state.repo(&client.name, &repo.name).cloned().unwrap_or_default();
+            let label = format!("{}/{}", client.name, repo.name);
+
+            // For main repo, prefer live archive data over cached state
+            let (last_backup, age) = if repo.name == "main" {
+                if let Some(info) = archive_info {
+                    let ts = format_borg_timestamp(&info.date);
+                    let age = format_age(&info.date);
+                    (ts, age)
+                } else {
+                    format_from_record(repo_state.last_backup.as_ref())
+                }
+            } else {
+                format_from_record(repo_state.last_backup.as_ref())
+            };
+
+            let stale = state.is_overdue(
+                &client.name, &repo.name, &OperationType::Backup,
+                config.schedule.backup_max_age_days,
+            );
+            let age_display = if stale && !is_active {
+                format!("{} !", age)
+            } else {
+                age
+            };
+
+            let status = if is_active { "ACTIVE" } else { "-" };
+            let last_prune = format_record_age(repo_state.last_prune.as_ref());
+            let last_check = format_record_age(repo_state.last_check.as_ref());
+            let integrity = repo_state.last_check.as_ref()
+                .map(|r| r.result.to_string())
+                .unwrap_or_else(|| "-".to_string());
+
+            println!(
+                "{:<25} | {:<19} | {:<12} | {:<10} | {:<12} | {:<12} | {:<10}",
+                label, last_backup, age_display, status, last_prune, last_check, integrity
+            );
+        }
+    }
+
+    // Overdue operations section
+    let mut overdue_lines: Vec<String> = vec![];
+    for client in &clients {
+        for repo in &client.repos {
+            let checks = [
+                (OperationType::Prune, config.schedule.prune_frequency_days),
+                (OperationType::Check, config.schedule.check_frequency_days),
+                (OperationType::RestoreTest, config.schedule.restore_test_frequency_days),
+            ];
+            for (op, freq) in &checks {
+                if state.is_overdue(&client.name, &repo.name, op, *freq) {
+                    let days = state.days_since(&client.name, &repo.name, op);
+                    let since = match days {
+                        Some(d) => format!("last: {}d ago", d),
+                        None => "never run".to_string(),
+                    };
+                    overdue_lines.push(format!(
+                        "  [!] {}/{}: {} overdue ({}, target: every {}d)",
+                        client.name, repo.name, op, since, freq
+                    ));
+                }
+            }
+        }
+    }
+
+    if !overdue_lines.is_empty() {
+        println!("\n=== Overdue Operations ===\n");
+        for line in &overdue_lines {
+            println!("{line}");
+        }
     }
 
     println!();
     Ok(())
 }
 
-fn print_client_row(
-    name: &str,
-    state: &ClientState,
-    archive: Option<&borg::ArchiveInfo>,
-    is_active: bool,
-) {
-    // Prefer live archive data over cached state
-    let (last_backup, age) = if let Some(info) = archive {
-        let ts = format_borg_timestamp(&info.date);
-        let age = format_age(&info.date);
-        (ts, age)
-    } else {
-        let ts = format_timestamp(state.last_backup_timestamp.as_deref());
-        (ts, "-".to_string())
+fn format_from_record(record: Option<&crate::config::OperationRecord>) -> (String, String) {
+    match record {
+        Some(r) => {
+            let ts = format_timestamp(Some(&r.timestamp));
+            let age = format_timestamp_age(&r.timestamp);
+            (ts, age)
+        }
+        None => ("-".to_string(), "-".to_string()),
+    }
+}
+
+fn format_record_age(record: Option<&crate::config::OperationRecord>) -> String {
+    match record {
+        Some(r) => format_timestamp_age(&r.timestamp),
+        None => "-".to_string(),
+    }
+}
+
+fn format_timestamp_age(ts: &str) -> String {
+    let Ok(dt) = NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S") else {
+        return "-".to_string();
     };
+    let now = Local::now().naive_local();
+    let duration = now.signed_duration_since(dt);
+    let days = duration.num_days();
+    let hours = duration.num_hours();
+    let minutes = duration.num_minutes();
 
-    let status = if is_active {
-        "ACTIVE"
+    if days > 0 {
+        format!("{}d ago", days)
+    } else if hours > 0 {
+        format!("{}h ago", hours)
+    } else if minutes > 0 {
+        format!("{}m ago", minutes)
     } else {
-        "-"
-    };
-
-    let last_check = format_timestamp(state.last_check_timestamp.as_deref());
-    let integrity = state.integrity_status.as_deref().unwrap_or("-");
-
-    println!(
-        "{:<20} | {:<19} | {:<10} | {:<10} | {:<19} | {:<10}",
-        name, last_backup, age, status, last_check, integrity
-    );
+        "just now".to_string()
+    }
 }
 
 /// Format a borg timestamp (e.g. "Mon, 2026-03-23 02:00:05") to "YYYY-MM-DD HH:MM".

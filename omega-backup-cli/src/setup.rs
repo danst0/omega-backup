@@ -5,7 +5,7 @@ use tokio::process::Command;
 
 use omega_backup_lib::config::{
     BorgConfig, ClientConfig, Config, DistributionConfig, KeysConfig, MachineRole, NtfyConfig,
-    RepoConfig, RetentionConfig, ServerConfig, UpdateConfig, default_config_path, expand_tilde,
+    RepoConfig, RetentionConfig, ScheduleConfig, ServerConfig, UpdateConfig, default_config_path, expand_tilde,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -500,6 +500,7 @@ async fn run_client_wizard() -> Result<()> {
         distribution: DistributionConfig::default(),
         retention: RetentionConfig::default(),
         offsite_retention: None,
+        schedule: ScheduleConfig::default(),
         update: UpdateConfig::default(),
     };
 
@@ -763,6 +764,7 @@ async fn run_management_wizard() -> Result<()> {
         distribution: DistributionConfig::default(),
         retention: RetentionConfig::default(),
         offsite_retention: None,
+        schedule: ScheduleConfig::default(),
         update: UpdateConfig::default(),
     };
 
@@ -1139,6 +1141,7 @@ async fn run_both_wizard() -> Result<()> {
         distribution: DistributionConfig::default(),
         retention: RetentionConfig::default(),
         offsite_retention: None,
+        schedule: ScheduleConfig::default(),
         update: UpdateConfig::default(),
     };
 

@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
+use chrono::{Local, NaiveDateTime, TimeZone};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -297,6 +299,42 @@ impl Default for DistributionConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ScheduleConfig {
+    #[serde(default = "default_backup_max_age_days")]
+    pub backup_max_age_days: u32,
+    #[serde(default = "default_prune_frequency_days")]
+    pub prune_frequency_days: u32,
+    #[serde(default = "default_schedule_check_frequency_days")]
+    pub check_frequency_days: u32,
+    #[serde(default = "default_restore_test_frequency_days")]
+    pub restore_test_frequency_days: u32,
+}
+
+fn default_backup_max_age_days() -> u32 {
+    2
+}
+fn default_prune_frequency_days() -> u32 {
+    30
+}
+fn default_schedule_check_frequency_days() -> u32 {
+    60
+}
+fn default_restore_test_frequency_days() -> u32 {
+    30
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            backup_max_age_days: default_backup_max_age_days(),
+            prune_frequency_days: default_prune_frequency_days(),
+            check_frequency_days: default_schedule_check_frequency_days(),
+            restore_test_frequency_days: default_restore_test_frequency_days(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RetentionConfig {
     #[serde(default = "default_keep_daily")]
     pub keep_daily: u32,
@@ -369,6 +407,8 @@ pub struct Config {
     /// Deprecated: use per-repo retention overrides instead. Still accepted for backward compat.
     #[serde(default, skip_serializing)]
     pub offsite_retention: Option<RetentionConfig>,
+    #[serde(default)]
+    pub schedule: ScheduleConfig,
     #[serde(default)]
     pub update: UpdateConfig,
 }
@@ -528,17 +568,115 @@ pub fn parse_mac_address(mac: &str) -> Result<[u8; 6]> {
     Ok(bytes)
 }
 
-/// State tracking for clients
+// ── Operation tracking types ────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationType {
+    Backup,
+    Prune,
+    Compact,
+    Check,
+    RestoreTest,
+}
+
+impl std::fmt::Display for OperationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OperationType::Backup => write!(f, "backup"),
+            OperationType::Prune => write!(f, "prune"),
+            OperationType::Compact => write!(f, "compact"),
+            OperationType::Check => write!(f, "check"),
+            OperationType::RestoreTest => write!(f, "restore-test"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OperationResult {
+    Success,
+    Warning,
+    Failed,
+}
+
+impl std::fmt::Display for OperationResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OperationResult::Success => write!(f, "success"),
+            OperationResult::Warning => write!(f, "warning"),
+            OperationResult::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackupStats {
+    pub original_size: u64,
+    pub compressed_size: u64,
+    pub deduplicated_size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OperationRecord {
+    pub operation: OperationType,
+    pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+    pub result: OperationResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<BackupStats>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct ClientState {
+pub struct RepoState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_backup: Option<OperationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prune: Option<OperationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compact: Option<OperationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check: Option<OperationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_restore_test: Option<OperationRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<OperationRecord>,
+}
+
+/// Summary of a client's state across all its repos (for backward compat / GUI).
+#[derive(Debug, Clone, Default)]
+pub struct ClientSummary {
     pub last_backup_timestamp: Option<String>,
-    pub last_backup_result: Option<String>,
+    pub last_backup_result: Option<OperationResult>,
     pub last_check_timestamp: Option<String>,
     pub integrity_status: Option<String>,
 }
 
+const MAX_HISTORY_PER_REPO: usize = 50;
+
+// ── AppState (v2) ───────────────────────────────────────────────
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct AppState(pub std::collections::HashMap<String, ClientState>);
+pub struct AppState {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub repos: HashMap<String, RepoState>,
+}
+
+/// Legacy state format for migration from v1.
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyClientState {
+    last_backup_timestamp: Option<String>,
+    last_backup_result: Option<String>,
+    last_check_timestamp: Option<String>,
+    integrity_status: Option<String>,
+}
 
 impl AppState {
     pub fn load() -> Result<Self> {
@@ -548,8 +686,74 @@ impl AppState {
         }
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read state file: {}", path.display()))?;
-        let state: AppState = serde_json::from_str(&content)
+
+        if content.trim().is_empty() {
+            return Ok(Self::default());
+        }
+
+        let value: serde_json::Value = serde_json::from_str(&content)
             .context("Failed to parse state file")?;
+
+        // Detect format: v2 has a "version" key
+        if value.get("version").and_then(|v| v.as_u64()).unwrap_or(0) >= 2 {
+            let state: AppState = serde_json::from_value(value)
+                .context("Failed to parse v2 state file")?;
+            return Ok(state);
+        }
+
+        // Legacy format: HashMap<String, LegacyClientState>
+        let legacy: HashMap<String, LegacyClientState> = serde_json::from_value(value)
+            .context("Failed to parse legacy state file")?;
+        let mut state = AppState { version: 2, repos: HashMap::new() };
+
+        for (client_name, old) in legacy {
+            let mut repo_state = RepoState::default();
+
+            if let Some(ref ts) = old.last_backup_timestamp {
+                let result = match old.last_backup_result.as_deref() {
+                    Some("success") | Some("OK") => OperationResult::Success,
+                    Some("WARNING") => OperationResult::Warning,
+                    _ => OperationResult::Failed,
+                };
+                let record = OperationRecord {
+                    operation: OperationType::Backup,
+                    timestamp: ts.clone(),
+                    duration_secs: None,
+                    result,
+                    message: None,
+                    stats: None,
+                };
+                repo_state.history.push(record.clone());
+                repo_state.last_backup = Some(record);
+            }
+
+            if let Some(ref ts) = old.last_check_timestamp {
+                let result = match old.integrity_status.as_deref() {
+                    Some("ok") | Some("OK") => OperationResult::Success,
+                    Some("FAILED") => OperationResult::Failed,
+                    _ => OperationResult::Warning,
+                };
+                let record = OperationRecord {
+                    operation: OperationType::Check,
+                    timestamp: ts.clone(),
+                    duration_secs: None,
+                    result,
+                    message: old.integrity_status.clone(),
+                    stats: None,
+                };
+                repo_state.history.push(record.clone());
+                repo_state.last_check = Some(record);
+            }
+
+            let key = Self::repo_key(&client_name, "main");
+            state.repos.insert(key, repo_state);
+        }
+
+        // Persist the migrated state
+        if let Err(e) = state.save() {
+            tracing::warn!("Failed to save migrated state: {}", e);
+        }
+
         Ok(state)
     }
 
@@ -559,20 +763,124 @@ impl AppState {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create state directory: {}", parent.display()))?;
         }
-        let content = serde_json::to_string_pretty(&self.0)
+        let content = serde_json::to_string_pretty(self)
             .context("Failed to serialize state")?;
         std::fs::write(&path, content)
             .with_context(|| format!("Failed to write state file: {}", path.display()))?;
         Ok(())
     }
 
-    pub fn client_mut(&mut self, name: &str) -> &mut ClientState {
-        self.0.entry(name.to_string()).or_default()
+    pub fn repo_key(client: &str, repo: &str) -> String {
+        format!("{}/{}", client, repo)
     }
 
-    pub fn client(&self, name: &str) -> Option<&ClientState> {
-        self.0.get(name)
+    pub fn repo_mut(&mut self, client: &str, repo: &str) -> &mut RepoState {
+        let key = Self::repo_key(client, repo);
+        self.repos.entry(key).or_default()
     }
+
+    pub fn repo(&self, client: &str, repo: &str) -> Option<&RepoState> {
+        let key = Self::repo_key(client, repo);
+        self.repos.get(&key)
+    }
+
+    /// Record an operation: updates the matching `last_*` field and pushes to history.
+    pub fn record_operation(&mut self, client: &str, repo: &str, record: OperationRecord) {
+        let rs = self.repo_mut(client, repo);
+        match record.operation {
+            OperationType::Backup => rs.last_backup = Some(record.clone()),
+            OperationType::Prune => rs.last_prune = Some(record.clone()),
+            OperationType::Compact => rs.last_compact = Some(record.clone()),
+            OperationType::Check => rs.last_check = Some(record.clone()),
+            OperationType::RestoreTest => rs.last_restore_test = Some(record.clone()),
+        }
+        rs.history.insert(0, record);
+        if rs.history.len() > MAX_HISTORY_PER_REPO {
+            rs.history.truncate(MAX_HISTORY_PER_REPO);
+        }
+    }
+
+    /// Check if an operation is overdue based on frequency_days.
+    pub fn is_overdue(&self, client: &str, repo: &str, op: &OperationType, frequency_days: u32) -> bool {
+        match self.days_since(client, repo, op) {
+            Some(days) => days >= frequency_days as i64,
+            None => true, // Never run → overdue
+        }
+    }
+
+    /// Days since the last successful run of an operation type.
+    pub fn days_since(&self, client: &str, repo: &str, op: &OperationType) -> Option<i64> {
+        let rs = self.repo(client, repo)?;
+        let record = match op {
+            OperationType::Backup => rs.last_backup.as_ref(),
+            OperationType::Prune => rs.last_prune.as_ref(),
+            OperationType::Compact => rs.last_compact.as_ref(),
+            OperationType::Check => rs.last_check.as_ref(),
+            OperationType::RestoreTest => rs.last_restore_test.as_ref(),
+        }?;
+        parse_days_since(&record.timestamp)
+    }
+
+    /// Most recent backup across all repos for a client.
+    pub fn client_last_backup(&self, client: &str) -> Option<&OperationRecord> {
+        self.repos
+            .iter()
+            .filter(|(key, _)| key.starts_with(&format!("{}/", client)))
+            .filter_map(|(_, rs)| rs.last_backup.as_ref())
+            .max_by(|a, b| a.timestamp.cmp(&b.timestamp))
+    }
+
+    /// Aggregate summary across all repos for a client (for GUI backward compat).
+    pub fn client_summary(&self, client: &str) -> Option<ClientSummary> {
+        let prefix = format!("{}/", client);
+        let matching: Vec<_> = self.repos
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .map(|(_, rs)| rs)
+            .collect();
+
+        if matching.is_empty() {
+            return None;
+        }
+
+        // Most recent backup across all repos
+        let last_backup = matching.iter()
+            .filter_map(|rs| rs.last_backup.as_ref())
+            .max_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        // Most recent check across all repos
+        let last_check = matching.iter()
+            .filter_map(|rs| rs.last_check.as_ref())
+            .max_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        // Worst integrity status (Failed > Warning > Success)
+        let integrity = matching.iter()
+            .filter_map(|rs| rs.last_check.as_ref())
+            .map(|r| &r.result)
+            .max_by(|a, b| {
+                let rank = |r: &OperationResult| match r {
+                    OperationResult::Success => 0,
+                    OperationResult::Warning => 1,
+                    OperationResult::Failed => 2,
+                };
+                rank(a).cmp(&rank(b))
+            });
+
+        Some(ClientSummary {
+            last_backup_timestamp: last_backup.map(|r| r.timestamp.clone()),
+            last_backup_result: last_backup.map(|r| r.result.clone()),
+            last_check_timestamp: last_check.map(|r| r.timestamp.clone()),
+            integrity_status: integrity.map(|r| r.to_string()),
+        })
+    }
+}
+
+/// Parse a timestamp string and return days elapsed since then.
+fn parse_days_since(timestamp: &str) -> Option<i64> {
+    let naive = NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S").ok()?;
+    let dt = Local.from_local_datetime(&naive).single()?;
+    let elapsed = Local::now().signed_duration_since(dt);
+    Some(elapsed.num_days())
 }
 
 #[cfg(test)]
@@ -713,6 +1021,7 @@ admin_user = "admin"
                 keep_yearly: 1,
             },
             offsite_retention: None,
+            schedule: ScheduleConfig::default(),
             update: UpdateConfig::default(),
         };
 
@@ -766,28 +1075,133 @@ optional = true
         assert!(client.find_repo("offsite").unwrap().optional);
     }
 
-    // ── AppState serialisation ───────────────────────────────────
+    // ── AppState v2 serialisation ──────────────────────────────
 
     #[test]
     fn test_app_state_round_trip() {
         let mut state = AppState::default();
-        {
-            let cs = state.client_mut("client1");
-            cs.last_backup_timestamp = Some("2026-02-27T02:00:00".to_string());
-            cs.last_backup_result = Some("success".to_string());
-            cs.integrity_status = Some("ok".to_string());
+        state.version = 2;
+        state.record_operation("client1", "main", OperationRecord {
+            operation: OperationType::Backup,
+            timestamp: "2026-02-27T02:00:00".to_string(),
+            duration_secs: Some(12.5),
+            result: OperationResult::Success,
+            message: None,
+            stats: Some(BackupStats {
+                original_size: 1000,
+                compressed_size: 800,
+                deduplicated_size: 200,
+                archive_name: Some("test-archive".to_string()),
+            }),
+        });
+
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        let loaded: AppState = serde_json::from_str(&json).unwrap();
+
+        let rs = loaded.repo("client1", "main").unwrap();
+        let backup = rs.last_backup.as_ref().unwrap();
+        assert_eq!(backup.timestamp, "2026-02-27T02:00:00");
+        assert_eq!(backup.result, OperationResult::Success);
+        assert_eq!(backup.stats.as_ref().unwrap().deduplicated_size, 200);
+        assert_eq!(rs.history.len(), 1);
+        assert!(loaded.repo("nonexistent", "main").is_none());
+    }
+
+    #[test]
+    fn test_app_state_legacy_migration() {
+        let legacy_json = r#"{
+            "client1": {
+                "last_backup_timestamp": "2026-02-27T02:00:00",
+                "last_backup_result": "success",
+                "last_check_timestamp": "2026-02-25T10:00:00",
+                "integrity_status": "ok"
+            }
+        }"#;
+
+        let value: serde_json::Value = serde_json::from_str(legacy_json).unwrap();
+        // No "version" key, so this is legacy
+        assert!(value.get("version").is_none());
+
+        let legacy: std::collections::HashMap<String, LegacyClientState> =
+            serde_json::from_value(value).unwrap();
+
+        let mut state = AppState { version: 2, repos: std::collections::HashMap::new() };
+        for (client_name, old) in legacy {
+            let mut repo_state = RepoState::default();
+            if let Some(ref ts) = old.last_backup_timestamp {
+                let record = OperationRecord {
+                    operation: OperationType::Backup,
+                    timestamp: ts.clone(),
+                    duration_secs: None,
+                    result: OperationResult::Success,
+                    message: None,
+                    stats: None,
+                };
+                repo_state.history.push(record.clone());
+                repo_state.last_backup = Some(record);
+            }
+            if let Some(ref ts) = old.last_check_timestamp {
+                let record = OperationRecord {
+                    operation: OperationType::Check,
+                    timestamp: ts.clone(),
+                    duration_secs: None,
+                    result: OperationResult::Success,
+                    message: old.integrity_status.clone(),
+                    stats: None,
+                };
+                repo_state.history.push(record.clone());
+                repo_state.last_check = Some(record);
+            }
+            state.repos.insert(AppState::repo_key(&client_name, "main"), repo_state);
         }
 
-        let json = serde_json::to_string_pretty(&state.0).unwrap();
-        let map: std::collections::HashMap<String, ClientState> =
-            serde_json::from_str(&json).unwrap();
-        let loaded = AppState(map);
+        let rs = state.repo("client1", "main").unwrap();
+        assert_eq!(rs.last_backup.as_ref().unwrap().timestamp, "2026-02-27T02:00:00");
+        assert_eq!(rs.last_check.as_ref().unwrap().result, OperationResult::Success);
+        assert_eq!(rs.history.len(), 2);
+    }
 
-        let cs = loaded.client("client1").unwrap();
-        assert_eq!(cs.last_backup_timestamp.as_deref(), Some("2026-02-27T02:00:00"));
-        assert_eq!(cs.last_backup_result.as_deref(), Some("success"));
-        assert_eq!(cs.integrity_status.as_deref(), Some("ok"));
-        assert!(loaded.client("nonexistent").is_none());
+    #[test]
+    fn test_record_operation_truncates_history() {
+        let mut state = AppState { version: 2, repos: HashMap::new() };
+        for i in 0..60 {
+            state.record_operation("c", "main", OperationRecord {
+                operation: OperationType::Backup,
+                timestamp: format!("2026-01-{:02}T00:00:00", (i % 28) + 1),
+                duration_secs: None,
+                result: OperationResult::Success,
+                message: None,
+                stats: None,
+            });
+        }
+        let rs = state.repo("c", "main").unwrap();
+        assert_eq!(rs.history.len(), 50); // MAX_HISTORY_PER_REPO
+    }
+
+    #[test]
+    fn test_client_summary() {
+        let mut state = AppState { version: 2, repos: HashMap::new() };
+        state.record_operation("client1", "main", OperationRecord {
+            operation: OperationType::Backup,
+            timestamp: "2026-03-20T02:00:00".to_string(),
+            duration_secs: None,
+            result: OperationResult::Success,
+            message: None,
+            stats: None,
+        });
+        state.record_operation("client1", "offsite", OperationRecord {
+            operation: OperationType::Backup,
+            timestamp: "2026-03-21T02:00:00".to_string(),
+            duration_secs: None,
+            result: OperationResult::Success,
+            message: None,
+            stats: None,
+        });
+
+        let summary = state.client_summary("client1").unwrap();
+        // Should pick the most recent backup (offsite, 03-21)
+        assert_eq!(summary.last_backup_timestamp.as_deref(), Some("2026-03-21T02:00:00"));
+        assert!(state.client_summary("nonexistent").is_none());
     }
 
     // ── Config::find_client ──────────────────────────────────────
@@ -823,6 +1237,7 @@ optional = true
             distribution: DistributionConfig::default(),
             retention: RetentionConfig::default(),
             offsite_retention: None,
+            schedule: ScheduleConfig::default(),
             update: UpdateConfig::default(),
         };
 

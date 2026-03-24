@@ -68,7 +68,7 @@ This is a single-crate async Rust CLI. `main.rs` owns the clap CLI definition an
 
 **Lockfile coordination:** After `borg create`, each client writes `~/.omega-backup/locks/<hostname>.lock` on the server via SSH. The last client to finish counts lockfiles and, if zero remain, issues `sudo shutdown -h now`. This coordinates multi-client shutdown without a central orchestrator.
 
-**State tracking:** `AppState` (persisted to `~/.cache/omega-backup/state.json`) tracks per-client timestamps and check results. `check_frequency_days` is compared against `last_check_timestamp` to skip full borg checks when not due.
+**State tracking:** `AppState` (v2, persisted to `~/.cache/omega-backup/state.json`) tracks per-repo operation history. Each repo key is `"client/repo"` and stores `RepoState` with `last_backup`, `last_prune`, `last_compact`, `last_check`, `last_restore_test` (`OperationRecord`s) plus a rolling `history` (max 50 entries). `ScheduleConfig` defines frequency targets for prune (30d), check (60d), and restore-test (30d). The status command shows overdue operations. Legacy v1 state (per-client `ClientState`) is auto-migrated on first load.
 
 **Key distribution:** `config listen` starts an axum HTTP server on a random port announced via mDNS (`_omega-backup._tcp`). A one-time 8-char hex code is displayed; the session key is HKDF-derived from it. Client sends passphrase + keyfile (AES-256-GCM encrypted, hex-encoded), receives config template. Note: the code calls `base64_encode`/`base64_decode` but actually uses hex encoding (no base64 dep).
 
@@ -83,7 +83,8 @@ Config
 ├── keys: KeysConfig            # local_dir (~/.borg-keys/), optional github_repo
 ├── distribution: DistributionConfig  # mDNS service name, port, timeout
 ├── retention: RetentionConfig  # daily/weekly/monthly/yearly keep counts
-└── offsite_retention: Option<RetentionConfig>
+├── offsite_retention: Option<RetentionConfig>
+└── schedule: ScheduleConfig   # backup_max_age_days, prune/check/restore_test frequency
 ```
 
 Each `ClientConfig` has a `name` (used in state keys and lockfile names), `hostname` (used in borg archive names), and `RepoConfig` entries with `path`, `ssh_key`, `passphrase_file`, `sources`, `compression`, `exclude_patterns`, `optional`.

@@ -90,9 +90,9 @@ fn populate(dashboard: &Rc<RefCell<DashboardInner>>, state: &GuiState) {
     let lockfiles = state.lockfiles.borrow();
 
     for client in &cfg.clients {
-        let cs = app_state.client(&client.name);
+        let cs = app_state.client_summary(&client.name);
         let is_active = lockfiles.iter().any(|l| l == &client.hostname);
-        let (dot_css, subtitle) = client_status_info(cs, client.repos.len(), is_active);
+        let (dot_css, subtitle) = client_status_info(cs.as_ref(), client.repos.len(), is_active);
 
         let dot = gtk::DrawingArea::builder()
             .width_request(12)
@@ -146,7 +146,7 @@ fn populate(dashboard: &Rc<RefCell<DashboardInner>>, state: &GuiState) {
 }
 
 fn client_status_info(
-    cs: Option<&omega_backup_lib::config::ClientState>,
+    cs: Option<&omega_backup_lib::config::ClientSummary>,
     repo_count: usize,
     is_active: bool,
 ) -> (&'static str, String) {
@@ -173,10 +173,10 @@ fn client_status_info(
         .and_then(|ts| parse_age_hours(ts));
 
     let dot = match age_hours {
-        Some(h) if h < 25.0 && check_str != "FAILED" => "green",
+        Some(h) if h < 25.0 && check_str != "failed" => "green",
         Some(h) if h < 48.0 => "yellow",
         _ => {
-            if cs.last_backup_timestamp.is_some() && check_str != "FAILED" {
+            if cs.last_backup_timestamp.is_some() && check_str != "failed" {
                 "yellow"
             } else {
                 "red"

@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
+use chrono::Local;
 use std::time::Duration;
 
 use crate::{
     borg::{self, BorgContext, PrunePolicy},
-    config::{AppState, ClientConfig, Config, RepoConfig},
+    config::{AppState, ClientConfig, Config, OperationRecord, OperationResult, OperationType, RepoConfig},
     log_line,
     ntfy::{self, NotificationSummary, NtfyConfig},
     ssh::{self, SshConfig, count_lockfiles},
@@ -154,7 +154,7 @@ async fn maintain_client(
     };
 
     // Determine if a full check is needed
-    let needs_check = !args.skip_check && should_run_check(state, &client.name, config.borg.check_frequency_days);
+    let needs_check = !args.skip_check && should_run_check(state, &client.name, "main", config.schedule.check_frequency_days);
 
     for repo in &repos {
         let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
@@ -175,8 +175,22 @@ async fn maintain_client(
         };
 
         // prune
+        let prune_start = std::time::Instant::now();
         match borg::prune(&ctx, &policy).await {
-            Ok(()) => lines.push(format!("{}/{}: prune OK", client.name, repo.name)),
+            Ok(()) => {
+                lines.push(format!("{}/{}: prune OK", client.name, repo.name));
+                if !args.dry_run {
+                    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                    state.record_operation(&client.name, &repo.name, OperationRecord {
+                        operation: OperationType::Prune,
+                        timestamp: now,
+                        duration_secs: Some(prune_start.elapsed().as_secs_f64()),
+                        result: OperationResult::Success,
+                        message: None,
+                        stats: None,
+                    });
+                }
+            }
             Err(e) if repo.optional => {
                 tracing::warn!("{} prune failed (optional): {}", repo.name, e);
                 lines.push(format!("{}/{}: prune WARN: {e}", client.name, repo.name));
@@ -186,8 +200,22 @@ async fn maintain_client(
         }
 
         // compact
+        let compact_start = std::time::Instant::now();
         match borg::compact(&ctx).await {
-            Ok(()) => lines.push(format!("{}/{}: compact OK", client.name, repo.name)),
+            Ok(()) => {
+                lines.push(format!("{}/{}: compact OK", client.name, repo.name));
+                if !args.dry_run {
+                    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                    state.record_operation(&client.name, &repo.name, OperationRecord {
+                        operation: OperationType::Compact,
+                        timestamp: now,
+                        duration_secs: Some(compact_start.elapsed().as_secs_f64()),
+                        result: OperationResult::Success,
+                        message: None,
+                        stats: None,
+                    });
+                }
+            }
             Err(e) if repo.optional => {
                 tracing::warn!("{} compact failed (optional): {}", repo.name, e);
                 continue;
@@ -197,17 +225,23 @@ async fn maintain_client(
 
         // check (only for non-optional repos or main repo)
         if repo.name == "main" || !repo.optional {
+            let check_start = std::time::Instant::now();
             if needs_check {
                 borg::check(&ctx, true)
                     .await
                     .with_context(|| format!("check failed for {}", repo.path))?;
                 lines.push(format!("{}/{}: check OK", client.name, repo.name));
 
-                if !args.dry_run && repo.name == "main" {
+                if !args.dry_run {
                     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-                    let cs = state.client_mut(&client.name);
-                    cs.last_check_timestamp = Some(now);
-                    cs.integrity_status = Some("ok".to_string());
+                    state.record_operation(&client.name, &repo.name, OperationRecord {
+                        operation: OperationType::Check,
+                        timestamp: now,
+                        duration_secs: Some(check_start.elapsed().as_secs_f64()),
+                        result: OperationResult::Success,
+                        message: Some("full".to_string()),
+                        stats: None,
+                    });
                 }
             } else {
                 borg::check(&ctx, false)
@@ -289,17 +323,23 @@ pub async fn run_check_only(
             .with_log_tx(log_tx.clone());
 
         log_line(&log_tx, format!("  Checking {}/{}...", client.name, repo.name));
+        let check_start = std::time::Instant::now();
         match borg::check(&ctx, true).await {
             Ok(()) => {
                 let line = format!("{}/{}: check OK", client.name, repo.name);
                 log_line(&log_tx, format!("  {line}"));
                 report_lines.push(line);
 
-                if !dry_run && repo.name == "main" {
+                if !dry_run {
                     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-                    let cs = state.client_mut(&client.name);
-                    cs.last_check_timestamp = Some(now);
-                    cs.integrity_status = Some("ok".to_string());
+                    state.record_operation(&client.name, &repo.name, OperationRecord {
+                        operation: OperationType::Check,
+                        timestamp: now,
+                        duration_secs: Some(check_start.elapsed().as_secs_f64()),
+                        result: OperationResult::Success,
+                        message: Some("full".to_string()),
+                        stats: None,
+                    });
                 }
             }
             Err(e) => {
@@ -308,6 +348,18 @@ pub async fn run_check_only(
                 tracing::error!("{}", line);
                 log_line(&log_tx, format!("  {line}"));
                 report_lines.push(line);
+
+                if !dry_run {
+                    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                    state.record_operation(&client.name, &repo.name, OperationRecord {
+                        operation: OperationType::Check,
+                        timestamp: now,
+                        duration_secs: Some(check_start.elapsed().as_secs_f64()),
+                        result: OperationResult::Failed,
+                        message: Some(format!("{e:#}")),
+                        stats: None,
+                    });
+                }
             }
         }
     }
@@ -351,26 +403,14 @@ pub async fn run_check_only(
     Ok(())
 }
 
-pub fn should_run_check(state: &AppState, client_name: &str, frequency_days: u32) -> bool {
-    let Some(cs) = state.client(client_name) else {
-        return true; // Never checked — run check
-    };
-    let Some(ref last_check) = cs.last_check_timestamp else {
-        return true;
-    };
-
-    // Parse timestamp
-    let Ok(naive) = NaiveDateTime::parse_from_str(last_check, "%Y-%m-%dT%H:%M:%S") else {
-        return true;
-    };
-    let last: DateTime<Local> = Local.from_local_datetime(&naive).single().unwrap_or_else(|| Local::now());
-    let elapsed = Local::now().signed_duration_since(last);
-    elapsed.num_days() >= frequency_days as i64
+pub fn should_run_check(state: &AppState, client_name: &str, repo_name: &str, frequency_days: u32) -> bool {
+    state.is_overdue(client_name, repo_name, &OperationType::Check, frequency_days)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::OperationRecord;
 
     fn days_ago(n: i64) -> String {
         (Local::now() - chrono::TimeDelta::days(n))
@@ -378,54 +418,63 @@ mod tests {
             .to_string()
     }
 
+    fn record_check(state: &mut AppState, client: &str, repo: &str, timestamp: String) {
+        state.record_operation(client, repo, OperationRecord {
+            operation: OperationType::Check,
+            timestamp,
+            duration_secs: None,
+            result: OperationResult::Success,
+            message: None,
+            stats: None,
+        });
+    }
+
     #[test]
     fn test_no_client_state_needs_check() {
         let state = AppState::default();
-        assert!(should_run_check(&state, "client1", 30));
+        assert!(should_run_check(&state, "client1", "main", 30));
     }
 
     #[test]
     fn test_no_check_timestamp_needs_check() {
         let mut state = AppState::default();
-        state.client_mut("client1").last_backup_result = Some("success".to_string());
-        // last_check_timestamp is None
-        assert!(should_run_check(&state, "client1", 30));
+        // Record a backup but no check
+        state.record_operation("client1", "main", OperationRecord {
+            operation: OperationType::Backup,
+            timestamp: days_ago(0),
+            duration_secs: None,
+            result: OperationResult::Success,
+            message: None,
+            stats: None,
+        });
+        assert!(should_run_check(&state, "client1", "main", 30));
     }
 
     #[test]
     fn test_recent_check_does_not_need_recheck() {
         let mut state = AppState::default();
-        state.client_mut("client1").last_check_timestamp = Some(days_ago(0));
-        assert!(!should_run_check(&state, "client1", 30));
+        record_check(&mut state, "client1", "main", days_ago(0));
+        assert!(!should_run_check(&state, "client1", "main", 30));
     }
 
     #[test]
     fn test_old_check_needs_recheck() {
         let mut state = AppState::default();
-        state.client_mut("client1").last_check_timestamp = Some("2000-01-01T00:00:00".to_string());
-        assert!(should_run_check(&state, "client1", 30));
-    }
-
-    #[test]
-    fn test_invalid_timestamp_needs_check() {
-        let mut state = AppState::default();
-        state.client_mut("client1").last_check_timestamp = Some("not-a-date".to_string());
-        assert!(should_run_check(&state, "client1", 30));
+        record_check(&mut state, "client1", "main", "2000-01-01T00:00:00".to_string());
+        assert!(should_run_check(&state, "client1", "main", 30));
     }
 
     #[test]
     fn test_exactly_at_boundary_needs_check() {
         let mut state = AppState::default();
-        // 30 days ago: elapsed.num_days() == 30 >= 30 → true
-        state.client_mut("client1").last_check_timestamp = Some(days_ago(30));
-        assert!(should_run_check(&state, "client1", 30));
+        record_check(&mut state, "client1", "main", days_ago(30));
+        assert!(should_run_check(&state, "client1", "main", 30));
     }
 
     #[test]
     fn test_one_day_before_boundary_no_check() {
         let mut state = AppState::default();
-        // 29 days ago: elapsed.num_days() == 29 < 30 → false
-        state.client_mut("client1").last_check_timestamp = Some(days_ago(29));
-        assert!(!should_run_check(&state, "client1", 30));
+        record_check(&mut state, "client1", "main", days_ago(29));
+        assert!(!should_run_check(&state, "client1", "main", 30));
     }
 }

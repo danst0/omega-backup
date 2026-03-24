@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::{
     borg::{self, BorgContext},
-    config::{AppState, ClientConfig, Config, RepoConfig},
+    config::{AppState, BackupStats, ClientConfig, Config, OperationRecord, OperationResult, OperationType, RepoConfig},
     ntfy::{self, NotificationSummary, NtfyConfig},
     ssh::{self, SshConfig, count_lockfiles, remove_lockfile, set_lockfile},
     wol,
@@ -103,10 +103,12 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
     let mut messages: Vec<String> = vec![];
     let mut total_duration = 0.0f64;
     let mut total_dedup = 0u64;
+    let mut state = AppState::load().unwrap_or_default();
 
     // Step 4: borg create for each selected repo
     for repo in &repos {
         let result = run_create(config, client, repo, args).await;
+        let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
         match result {
             Ok(create_result) => {
                 messages.push(format!(
@@ -116,6 +118,22 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
                 total_duration += create_result.duration_secs;
                 total_dedup += create_result.deduplicated_size;
                 tracing::info!("{} backup complete: {}", repo.name, create_result.archive_name);
+
+                if !args.dry_run {
+                    state.record_operation(&client.name, &repo.name, OperationRecord {
+                        operation: OperationType::Backup,
+                        timestamp,
+                        duration_secs: Some(create_result.duration_secs),
+                        result: OperationResult::Success,
+                        message: None,
+                        stats: Some(BackupStats {
+                            original_size: create_result.original_size,
+                            compressed_size: create_result.compressed_size,
+                            deduplicated_size: create_result.deduplicated_size,
+                            archive_name: Some(create_result.archive_name.clone()),
+                        }),
+                    });
+                }
             }
             Err(e) => {
                 if repo.optional {
@@ -126,6 +144,17 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
                     messages.push(format!("{} backup FAILED: {e:#}", repo.name));
                     tracing::error!("{} backup failed: {}", repo.name, e);
                 }
+
+                if !args.dry_run {
+                    state.record_operation(&client.name, &repo.name, OperationRecord {
+                        operation: OperationType::Backup,
+                        timestamp,
+                        duration_secs: None,
+                        result: if repo.optional { OperationResult::Warning } else { OperationResult::Failed },
+                        message: Some(format!("{e:#}")),
+                        stats: None,
+                    });
+                }
             }
         }
     }
@@ -135,16 +164,8 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
         let _ = remove_lockfile(&ssh, &client.hostname).await;
     }
 
-    // Step 6: Update state
-    let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    let result_str = if overall_success { "success" } else { "failed" };
+    // Step 6: Save state
     if !args.dry_run {
-        let mut state = AppState::load().unwrap_or_default();
-        {
-            let cs = state.client_mut(&client.name);
-            cs.last_backup_timestamp = Some(timestamp.clone());
-            cs.last_backup_result = Some(result_str.to_string());
-        }
         if let Err(e) = state.save() {
             tracing::warn!("Failed to save state: {}", e);
         }

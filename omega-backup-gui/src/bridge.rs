@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use omega_backup_lib::config::{AppState, ClientState, Config, default_config_path};
+use omega_backup_lib::config::{AppState, Config, OperationRecord, OperationResult, OperationType, default_config_path};
 use omega_backup_lib::ssh::{self, SshConfig};
 use omega_backup_lib::{borg, init, maintenance, reset, restore, wol};
 use borg::BorgContext;
@@ -169,7 +169,6 @@ async fn backend_loop(
                                 .with_binary(&cfg.borg.binary)
                                 .with_lock_wait(cfg.borg.lock_wait_secs);
                             if let Ok(Some(info)) = borg::list_latest(&ctx).await {
-                                let cs = state.client_mut(&client.name);
                                 // Parse borg timestamp "Mon, 2026-03-23 02:00:05"
                                 let date_part = info.date.split_once(", ")
                                     .map(|(_, rest)| rest)
@@ -178,12 +177,20 @@ async fn backend_loop(
                                     date_part, "%Y-%m-%d %H:%M:%S",
                                 ) {
                                     let ts = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
+                                    let rs = state.repo_mut(&client.name, &repo.name);
                                     // Only update if live data is newer
-                                    let is_newer = cs.last_backup_timestamp.as_ref()
-                                        .map(|existing| ts > *existing)
+                                    let is_newer = rs.last_backup.as_ref()
+                                        .map(|existing| ts > existing.timestamp)
                                         .unwrap_or(true);
                                     if is_newer {
-                                        cs.last_backup_timestamp = Some(ts);
+                                        rs.last_backup = Some(OperationRecord {
+                                            operation: OperationType::Backup,
+                                            timestamp: ts,
+                                            duration_secs: None,
+                                            result: OperationResult::Success,
+                                            message: Some("from live borg data".to_string()),
+                                            stats: None,
+                                        });
                                     }
                                 }
                             }
