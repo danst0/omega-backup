@@ -450,7 +450,14 @@ impl<'de> Deserialize<'de> for ClientConfig {
         }
 
         // Fall back to old format (has "main_repo" key)
-        let old: OldFormat = value
+        // Known scalar/non-repo keys in the client table
+        const KNOWN_KEYS: &[&str] = &["name", "hostname", "main_repo", "offsite_repo"];
+
+        let table = value.as_table().ok_or_else(|| {
+            serde::de::Error::custom("expected a table for client config")
+        })?;
+
+        let old: OldFormat = toml::Value::Table(table.clone())
             .try_into()
             .map_err(serde::de::Error::custom)?;
 
@@ -462,6 +469,22 @@ impl<'de> Deserialize<'de> for ClientConfig {
         if let Some(mut offsite) = old.offsite_repo {
             offsite.name = "offsite".to_string();
             repos.push(offsite);
+        }
+
+        // Pick up any additional table entries as extra repos
+        for (key, val) in table {
+            if KNOWN_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            if let toml::Value::Table(_) = val {
+                let mut repo: RepoConfig = val.clone()
+                    .try_into()
+                    .map_err(serde::de::Error::custom)?;
+                if repo.name.is_empty() {
+                    repo.name = key.clone();
+                }
+                repos.push(repo);
+            }
         }
 
         Ok(ClientConfig {
