@@ -55,13 +55,13 @@ pub fn send_magic_packet(mac: [u8; 6], broadcast: &str) -> Result<()> {
     Ok(())
 }
 
-/// Send WoL using the MAC string, defaulting to 255.255.255.255 broadcast.
-pub fn wake(mac_str: &str) -> Result<()> {
+/// Send WoL using the MAC string to the given broadcast address.
+pub fn wake(mac_str: &str, broadcast: &str) -> Result<()> {
     let mac = parse_mac_str(mac_str)
         .with_context(|| format!("Invalid MAC address: {mac_str}"))?;
-    send_magic_packet(mac, "255.255.255.255")
+    send_magic_packet(mac, broadcast)
         .context("Failed to send Wake-on-LAN magic packet")?;
-    tracing::info!("Sent WoL magic packet to {}", mac_str);
+    tracing::info!("Sent WoL magic packet to {} via {}", mac_str, broadcast);
     Ok(())
 }
 

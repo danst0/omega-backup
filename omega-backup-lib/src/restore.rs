@@ -55,7 +55,7 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
     } else {
         // Step 1: Wake-on-LAN (server may be offline)
         tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
-        wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
+        wol::wake(&config.server.mac, &config.server.broadcast).context("Failed to send WoL packet")?;
 
         // Step 2: SSH poll
         let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
@@ -74,8 +74,8 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
         .context("Backup server did not come online")?;
     }
 
-    let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
-        .with_ssh_key(&repo.ssh_key)
+    let ctx = BorgContext::new(repo.path(), repo.passphrase_file())
+        .with_ssh_key(repo.ssh_key())
         .with_binary(&config.borg.binary)
         .with_dry_run(args.dry_run)
         .with_verbose(args.verbose)
@@ -88,7 +88,7 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
         .context("Failed to list archives")?;
 
     if archives.is_empty() {
-        anyhow::bail!("No archives found in repository: {}", repo.path);
+        anyhow::bail!("No archives found in repository: {}", repo.path());
     }
 
     for (i, archive) in archives.iter().enumerate() {
@@ -97,7 +97,7 @@ pub async fn run_restore_test(config: &Config, client_name: &str, args: &Restore
 
     // Determine which archive to use
     let selected = select_archive(&archives, args.archive.as_deref())
-        .with_context(|| format!("Failed to select archive for repo: {}", repo.path))?;
+        .with_context(|| format!("Failed to select archive for repo: {}", repo.path()))?;
     let archive_name = selected.name.clone();
 
     log_line(&log_tx, format!("\nUsing archive: {archive_name}"));

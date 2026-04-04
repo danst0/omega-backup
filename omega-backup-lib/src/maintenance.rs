@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use crate::{
     borg::{self, BorgContext, PrunePolicy},
-    config::{AppState, ClientConfig, Config, OperationRecord, OperationResult, OperationType, RepoConfig},
+    config::{AppState, ClientConfig, Config, OperationRecord, OperationResult, OperationType, RepoBackend, RepoConfig},
     log_line,
     ntfy::{self, NotificationSummary, NtfyConfig},
+    restic::{self, ResticContext},
     ssh::{self, SshConfig, count_lockfiles},
     wol, LogSender,
 };
@@ -38,7 +39,7 @@ pub async fn run_maintenance(config: &Config, args: &MaintenanceArgs, log_tx: Op
     } else {
         // Step 1: Wake-on-LAN
         tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
-        wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
+        wol::wake(&config.server.mac, &config.server.broadcast).context("Failed to send WoL packet")?;
 
         // Step 2: SSH poll
         log_line(&log_tx, "Waiting for backup server to come online...");
@@ -157,81 +158,187 @@ async fn maintain_client(
     let needs_check = !args.skip_check && should_run_check(state, &client.name, "main", config.schedule.check_frequency_days);
 
     for repo in &repos {
-        let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
-            .with_ssh_key(&repo.ssh_key)
-            .with_binary(&config.borg.binary)
-            .with_dry_run(args.dry_run)
-            .with_verbose(args.verbose)
-            .with_lock_wait(config.borg.lock_wait_secs)
-            .with_log_tx(log_tx.clone());
-
-        let retention = repo.retention.as_ref().unwrap_or(&config.retention);
-        let policy = PrunePolicy {
-            keep_daily: retention.keep_daily,
-            keep_weekly: retention.keep_weekly,
-            keep_monthly: retention.keep_monthly,
-            keep_yearly: retention.keep_yearly,
-            prefix: Some(client.hostname.clone()),
-        };
-
-        // prune
-        let prune_start = std::time::Instant::now();
-        match borg::prune(&ctx, &policy).await {
-            Ok(()) => {
-                lines.push(format!("{}/{}: prune OK", client.name, repo.name));
-                if !args.dry_run {
-                    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-                    state.record_operation(&client.name, &repo.name, OperationRecord {
-                        operation: OperationType::Prune,
-                        timestamp: now,
-                        duration_secs: Some(prune_start.elapsed().as_secs_f64()),
-                        result: OperationResult::Success,
-                        message: None,
-                        stats: None,
-                    });
-                }
+        match &repo.backend {
+            RepoBackend::Borg { .. } => {
+                maintain_borg_repo(config, client, repo, state, args, needs_check, &mut lines, log_tx).await?;
             }
-            Err(e) if repo.optional => {
-                tracing::warn!("{} prune failed (optional): {}", repo.name, e);
-                lines.push(format!("{}/{}: prune WARN: {e}", client.name, repo.name));
-                continue;
+            RepoBackend::Restic { .. } => {
+                maintain_restic_repo(config, repo, state, args, client, &mut lines, log_tx).await?;
             }
-            Err(e) => return Err(e).with_context(|| format!("prune failed for {}", repo.path)),
         }
+    }
 
-        // compact
-        let compact_start = std::time::Instant::now();
-        match borg::compact(&ctx).await {
-            Ok(()) => {
-                lines.push(format!("{}/{}: compact OK", client.name, repo.name));
-                if !args.dry_run {
-                    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-                    state.record_operation(&client.name, &repo.name, OperationRecord {
-                        operation: OperationType::Compact,
-                        timestamp: now,
-                        duration_secs: Some(compact_start.elapsed().as_secs_f64()),
-                        result: OperationResult::Success,
-                        message: None,
-                        stats: None,
-                    });
-                }
+    Ok(lines)
+}
+
+async fn maintain_borg_repo(
+    config: &Config,
+    client: &ClientConfig,
+    repo: &RepoConfig,
+    state: &mut AppState,
+    args: &MaintenanceArgs,
+    needs_check: bool,
+    lines: &mut Vec<String>,
+    log_tx: &Option<LogSender>,
+) -> Result<()> {
+    let ctx = BorgContext::new(repo.path(), repo.passphrase_file())
+        .with_ssh_key(repo.ssh_key())
+        .with_binary(&config.borg.binary)
+        .with_dry_run(args.dry_run)
+        .with_verbose(args.verbose)
+        .with_lock_wait(config.borg.lock_wait_secs)
+        .with_log_tx(log_tx.clone());
+
+    let retention = repo.retention.as_ref().unwrap_or(&config.retention);
+    let policy = PrunePolicy {
+        keep_daily: retention.keep_daily,
+        keep_weekly: retention.keep_weekly,
+        keep_monthly: retention.keep_monthly,
+        keep_yearly: retention.keep_yearly,
+        prefix: Some(client.hostname.clone()),
+    };
+
+    // prune
+    let prune_start = std::time::Instant::now();
+    match borg::prune(&ctx, &policy).await {
+        Ok(()) => {
+            lines.push(format!("{}/{}: prune OK", client.name, repo.name));
+            if !args.dry_run {
+                let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                state.record_operation(&client.name, &repo.name, OperationRecord {
+                    operation: OperationType::Prune,
+                    timestamp: now,
+                    duration_secs: Some(prune_start.elapsed().as_secs_f64()),
+                    result: OperationResult::Success,
+                    message: None,
+                    stats: None,
+                });
             }
-            Err(e) if repo.optional => {
-                tracing::warn!("{} compact failed (optional): {}", repo.name, e);
-                continue;
-            }
-            Err(e) => return Err(e).with_context(|| format!("compact failed for {}", repo.path)),
         }
+        Err(e) if repo.optional => {
+            tracing::warn!("{} prune failed (optional): {}", repo.name, e);
+            lines.push(format!("{}/{}: prune WARN: {e}", client.name, repo.name));
+            return Ok(());
+        }
+        Err(e) => return Err(e).with_context(|| format!("prune failed for {}", repo.path())),
+    }
 
-        // check (only for non-optional repos or main repo)
-        if repo.name == "main" || !repo.optional {
-            let check_start = std::time::Instant::now();
-            if needs_check {
-                borg::check(&ctx, true)
-                    .await
-                    .with_context(|| format!("check failed for {}", repo.path))?;
+    // compact
+    let compact_start = std::time::Instant::now();
+    match borg::compact(&ctx).await {
+        Ok(()) => {
+            lines.push(format!("{}/{}: compact OK", client.name, repo.name));
+            if !args.dry_run {
+                let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                state.record_operation(&client.name, &repo.name, OperationRecord {
+                    operation: OperationType::Compact,
+                    timestamp: now,
+                    duration_secs: Some(compact_start.elapsed().as_secs_f64()),
+                    result: OperationResult::Success,
+                    message: None,
+                    stats: None,
+                });
+            }
+        }
+        Err(e) if repo.optional => {
+            tracing::warn!("{} compact failed (optional): {}", repo.name, e);
+            return Ok(());
+        }
+        Err(e) => return Err(e).with_context(|| format!("compact failed for {}", repo.path())),
+    }
+
+    // check (only for non-optional repos or main repo)
+    if repo.name == "main" || !repo.optional {
+        let check_start = std::time::Instant::now();
+        if needs_check {
+            borg::check(&ctx, true)
+                .await
+                .with_context(|| format!("check failed for {}", repo.path()))?;
+            lines.push(format!("{}/{}: check OK", client.name, repo.name));
+
+            if !args.dry_run {
+                let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                state.record_operation(&client.name, &repo.name, OperationRecord {
+                    operation: OperationType::Check,
+                    timestamp: now,
+                    duration_secs: Some(check_start.elapsed().as_secs_f64()),
+                    result: OperationResult::Success,
+                    message: Some("full".to_string()),
+                    stats: None,
+                });
+            }
+        } else {
+            borg::check(&ctx, false)
+                .await
+                .with_context(|| format!("quick check failed for {}", repo.path()))?;
+            lines.push(format!("{}/{}: quick-check OK", client.name, repo.name));
+        }
+    }
+
+    Ok(())
+}
+
+async fn maintain_restic_repo(
+    config: &Config,
+    repo: &RepoConfig,
+    state: &mut AppState,
+    args: &MaintenanceArgs,
+    client: &ClientConfig,
+    lines: &mut Vec<String>,
+    log_tx: &Option<LogSender>,
+) -> Result<()> {
+    let (restic_repo, password_file, rclone_config, extra_flags) = match &repo.backend {
+        RepoBackend::Restic { repo: r, password_file, rclone_config, extra_flags } => {
+            (r.as_str(), password_file.as_str(), rclone_config.as_deref(), extra_flags.clone())
+        }
+        _ => return Ok(()),
+    };
+
+    let mut ctx = ResticContext::new(restic_repo, password_file)
+        .with_binary(&config.restic.binary)
+        .with_dry_run(args.dry_run)
+        .with_verbose(args.verbose)
+        .with_log_tx(log_tx.clone());
+    if let Some(rc) = rclone_config {
+        ctx = ctx.with_rclone_config(rc);
+    }
+    for flag in &extra_flags {
+        ctx = ctx.with_extra_flag(flag);
+    }
+
+    let retention = repo.retention.as_ref().unwrap_or(&config.retention);
+
+    // forget + prune (restic combines these)
+    let prune_start = std::time::Instant::now();
+    match restic::forget(&ctx, retention.keep_daily, retention.keep_weekly, retention.keep_monthly, retention.keep_yearly).await {
+        Ok(()) => {
+            lines.push(format!("{}/{}: forget+prune OK", client.name, repo.name));
+            if !args.dry_run {
+                let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                state.record_operation(&client.name, &repo.name, OperationRecord {
+                    operation: OperationType::Prune,
+                    timestamp: now,
+                    duration_secs: Some(prune_start.elapsed().as_secs_f64()),
+                    result: OperationResult::Success,
+                    message: None,
+                    stats: None,
+                });
+            }
+        }
+        Err(e) if repo.optional => {
+            tracing::warn!("{} forget failed (optional): {}", repo.name, e);
+            lines.push(format!("{}/{}: forget WARN: {e}", client.name, repo.name));
+            return Ok(());
+        }
+        Err(e) => return Err(e).with_context(|| format!("restic forget failed for {}", restic_repo)),
+    }
+
+    // check
+    if !args.skip_check && (repo.name == "main" || !repo.optional) {
+        let check_start = std::time::Instant::now();
+        match restic::check(&ctx).await {
+            Ok(()) => {
                 lines.push(format!("{}/{}: check OK", client.name, repo.name));
-
                 if !args.dry_run {
                     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
                     state.record_operation(&client.name, &repo.name, OperationRecord {
@@ -239,20 +346,19 @@ async fn maintain_client(
                         timestamp: now,
                         duration_secs: Some(check_start.elapsed().as_secs_f64()),
                         result: OperationResult::Success,
-                        message: Some("full".to_string()),
+                        message: None,
                         stats: None,
                     });
                 }
-            } else {
-                borg::check(&ctx, false)
-                    .await
-                    .with_context(|| format!("quick check failed for {}", repo.path))?;
-                lines.push(format!("{}/{}: quick-check OK", client.name, repo.name));
             }
+            Err(e) if repo.optional => {
+                tracing::warn!("{} check failed (optional): {}", repo.name, e);
+            }
+            Err(e) => return Err(e).with_context(|| format!("restic check failed for {}", restic_repo)),
         }
     }
 
-    Ok(lines)
+    Ok(())
 }
 
 /// Run integrity check only for a specific client (ignores check_frequency_days).
@@ -276,7 +382,7 @@ pub async fn run_check_only(
     if !config.server_is_local() {
         // Step 1: Wake-on-LAN
         tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
-        wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
+        wol::wake(&config.server.mac, &config.server.broadcast).context("Failed to send WoL packet")?;
 
         // Step 2: SSH poll
         let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
@@ -314,8 +420,8 @@ pub async fn run_check_only(
 
     // Step 4: Run full check on each repo
     for repo in &repos {
-        let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
-            .with_ssh_key(&repo.ssh_key)
+        let ctx = BorgContext::new(repo.path(), repo.passphrase_file())
+            .with_ssh_key(repo.ssh_key())
             .with_binary(&config.borg.binary)
             .with_dry_run(dry_run)
             .with_verbose(verbose)

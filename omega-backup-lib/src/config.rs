@@ -29,6 +29,9 @@ pub struct ServerConfig {
     /// Minutes of backup inactivity before the server auto-shuts down (default: 90).
     #[serde(default = "default_shutdown_idle_minutes")]
     pub shutdown_idle_minutes: u64,
+    /// Broadcast address for WoL packets (default: 255.255.255.255).
+    #[serde(default = "default_broadcast")]
+    pub broadcast: String,
 }
 
 fn default_poll_interval() -> u64 {
@@ -39,6 +42,9 @@ fn default_poll_timeout() -> u64 {
 }
 fn default_shutdown_idle_minutes() -> u64 {
     90
+}
+fn default_broadcast() -> String {
+    "255.255.255.255".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -72,6 +78,24 @@ impl Default for BorgConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResticConfig {
+    #[serde(default = "default_restic_binary")]
+    pub binary: String,
+}
+
+fn default_restic_binary() -> String {
+    "restic".to_string()
+}
+
+impl Default for ResticConfig {
+    fn default() -> Self {
+        Self {
+            binary: default_restic_binary(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NtfyConfig {
     pub url: String,
     pub token: Option<String>,
@@ -83,23 +107,69 @@ fn default_ntfy_topic() -> String {
     "omega-backup".to_string()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum RepoBackend {
+    Borg {
+        path: String,
+        passphrase_file: String,
+        ssh_key: String,
+        #[serde(default = "default_compression")]
+        compression: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borg_filter: Option<String>,
+    },
+    Restic {
+        /// Restic repository path, e.g. "rclone:gdrive:backup/client1"
+        repo: String,
+        /// Path to file containing the restic password
+        password_file: String,
+        /// Optional: path to rclone config (passed via RCLONE_CONFIG env)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rclone_config: Option<String>,
+        /// Extra restic flags (e.g. ["--verbose", "--limit-upload=10000"])
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extra_flags: Vec<String>,
+    },
+}
+
+impl RepoBackend {
+    pub fn is_borg(&self) -> bool {
+        matches!(self, RepoBackend::Borg { .. })
+    }
+
+    pub fn is_restic(&self) -> bool {
+        matches!(self, RepoBackend::Restic { .. })
+    }
+
+    /// Returns the repo path/URI for display purposes.
+    pub fn repo_path(&self) -> &str {
+        match self {
+            RepoBackend::Borg { path, .. } => path,
+            RepoBackend::Restic { repo, .. } => repo,
+        }
+    }
+
+    /// Returns the password/passphrase file path.
+    pub fn password_file(&self) -> &str {
+        match self {
+            RepoBackend::Borg { passphrase_file, .. } => passphrase_file,
+            RepoBackend::Restic { password_file, .. } => password_file,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoConfig {
     pub name: String,
-    pub path: String,
-    pub ssh_key: String,
-    pub passphrase_file: String,
+    pub backend: RepoBackend,
     pub sources: Vec<String>,
-    #[serde(default = "default_compression")]
-    pub compression: String,
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
     #[serde(default)]
     pub exclude_patterns_from: Vec<String>,
     #[serde(default)]
     pub exclude_if_present: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub borg_filter: Option<String>,
     #[serde(default)]
     pub optional: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,56 +180,207 @@ pub struct RepoConfig {
     pub post_create_commands: Option<Vec<String>>,
 }
 
-// Manual Deserialize for RepoConfig to handle missing `name` field (backward compat)
+impl RepoConfig {
+    /// Create a new borg repo config with sensible defaults.
+    pub fn new_borg(
+        name: impl Into<String>,
+        path: impl Into<String>,
+        ssh_key: impl Into<String>,
+        passphrase_file: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            backend: RepoBackend::Borg {
+                path: path.into(),
+                passphrase_file: passphrase_file.into(),
+                ssh_key: ssh_key.into(),
+                compression: default_compression(),
+                borg_filter: None,
+            },
+            sources: Vec::new(),
+            exclude_patterns: Vec::new(),
+            exclude_patterns_from: Vec::new(),
+            exclude_if_present: Vec::new(),
+            optional: false,
+            retention: None,
+            pre_create_commands: None,
+            post_create_commands: None,
+        }
+    }
+
+    /// Create a new restic repo config with sensible defaults.
+    pub fn new_restic(
+        name: impl Into<String>,
+        repo: impl Into<String>,
+        password_file: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            backend: RepoBackend::Restic {
+                repo: repo.into(),
+                password_file: password_file.into(),
+                rclone_config: None,
+                extra_flags: Vec::new(),
+            },
+            sources: Vec::new(),
+            exclude_patterns: Vec::new(),
+            exclude_patterns_from: Vec::new(),
+            exclude_if_present: Vec::new(),
+            optional: false,
+            retention: None,
+            pre_create_commands: None,
+            post_create_commands: None,
+        }
+    }
+
+    pub fn is_borg(&self) -> bool {
+        self.backend.is_borg()
+    }
+
+    pub fn is_restic(&self) -> bool {
+        self.backend.is_restic()
+    }
+
+    /// Convenience: borg repo path. Panics if not a borg backend.
+    pub fn path(&self) -> &str {
+        match &self.backend {
+            RepoBackend::Borg { path, .. } => path,
+            _ => panic!("path() called on non-borg repo"),
+        }
+    }
+
+    /// Convenience: borg passphrase file. Panics if not borg.
+    pub fn passphrase_file(&self) -> &str {
+        match &self.backend {
+            RepoBackend::Borg { passphrase_file, .. } => passphrase_file,
+            _ => panic!("passphrase_file() called on non-borg repo"),
+        }
+    }
+
+    /// Convenience: borg ssh key. Panics if not borg.
+    pub fn ssh_key(&self) -> &str {
+        match &self.backend {
+            RepoBackend::Borg { ssh_key, .. } => ssh_key,
+            _ => panic!("ssh_key() called on non-borg repo"),
+        }
+    }
+
+    /// Convenience: borg compression. Panics if not borg.
+    pub fn compression(&self) -> &str {
+        match &self.backend {
+            RepoBackend::Borg { compression, .. } => compression,
+            _ => panic!("compression() called on non-borg repo"),
+        }
+    }
+
+    /// Convenience: borg filter. Panics if not borg.
+    pub fn borg_filter(&self) -> Option<&str> {
+        match &self.backend {
+            RepoBackend::Borg { borg_filter, .. } => borg_filter.as_deref(),
+            _ => panic!("borg_filter() called on non-borg repo"),
+        }
+    }
+}
+
+// Manual Deserialize for RepoConfig: supports both old borg-only format (no `type` field)
+// and new tagged format (`type = "borg"` or `type = "restic"`).
 impl<'de> Deserialize<'de> for RepoConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct RepoConfigHelper {
-            #[serde(default)]
-            name: Option<String>,
-            path: String,
-            ssh_key: String,
-            passphrase_file: String,
-            #[serde(default)]
-            sources: Vec<String>,
-            #[serde(default = "default_compression")]
-            compression: String,
-            #[serde(default)]
-            exclude_patterns: Vec<String>,
-            #[serde(default)]
-            exclude_patterns_from: Vec<String>,
-            #[serde(default)]
-            exclude_if_present: Vec<String>,
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            borg_filter: Option<String>,
-            #[serde(default)]
-            optional: bool,
-            #[serde(default)]
-            retention: Option<RetentionConfig>,
-            #[serde(default)]
-            pre_create_commands: Option<Vec<String>>,
-            #[serde(default)]
-            post_create_commands: Option<Vec<String>>,
-        }
-        let helper = RepoConfigHelper::deserialize(deserializer)?;
+        let value = toml::Value::deserialize(deserializer)?;
+
+        // Shared fields
+        let name = value.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let sources: Vec<String> = value.get("sources")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let exclude_patterns: Vec<String> = value.get("exclude_patterns")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let exclude_patterns_from: Vec<String> = value.get("exclude_patterns_from")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let exclude_if_present: Vec<String> = value.get("exclude_if_present")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let optional = value.get("optional")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let retention: Option<RetentionConfig> = value.get("retention")
+            .and_then(|v| v.clone().try_into().ok());
+        let pre_create_commands: Option<Vec<String>> = value.get("pre_create_commands")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+        let post_create_commands: Option<Vec<String>> = value.get("post_create_commands")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+
+        let repo_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("borg");
+
+        let backend = match repo_type {
+            "restic" => {
+                let repo = value.get("repo")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| serde::de::Error::custom("restic repo requires 'repo' field"))?
+                    .to_string();
+                let password_file = value.get("password_file")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| serde::de::Error::custom("restic repo requires 'password_file' field"))?
+                    .to_string();
+                let rclone_config = value.get("rclone_config")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let extra_flags: Vec<String> = value.get("extra_flags")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                RepoBackend::Restic { repo, password_file, rclone_config, extra_flags }
+            }
+            _ => {
+                // Default: borg (backward compat — no type field required)
+                let path = value.get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| serde::de::Error::custom("borg repo requires 'path' field"))?
+                    .to_string();
+                let ssh_key = value.get("ssh_key")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| serde::de::Error::custom("borg repo requires 'ssh_key' field"))?
+                    .to_string();
+                let passphrase_file = value.get("passphrase_file")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| serde::de::Error::custom("borg repo requires 'passphrase_file' field"))?
+                    .to_string();
+                let compression = value.get("compression")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("auto,zstd")
+                    .to_string();
+                let borg_filter = value.get("borg_filter")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                RepoBackend::Borg { path, passphrase_file, ssh_key, compression, borg_filter }
+            }
+        };
+
         Ok(RepoConfig {
-            name: helper.name.unwrap_or_default(),
-            path: helper.path,
-            ssh_key: helper.ssh_key,
-            passphrase_file: helper.passphrase_file,
-            sources: helper.sources,
-            compression: helper.compression,
-            exclude_patterns: helper.exclude_patterns,
-            exclude_patterns_from: helper.exclude_patterns_from,
-            exclude_if_present: helper.exclude_if_present,
-            borg_filter: helper.borg_filter,
-            optional: helper.optional,
-            retention: helper.retention,
-            pre_create_commands: helper.pre_create_commands,
-            post_create_commands: helper.post_create_commands,
+            name,
+            backend,
+            sources,
+            exclude_patterns,
+            exclude_patterns_from,
+            exclude_if_present,
+            optional,
+            retention,
+            pre_create_commands,
+            post_create_commands,
         })
     }
 }
@@ -395,6 +616,8 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub borg: BorgConfig,
+    #[serde(default)]
+    pub restic: ResticConfig,
     pub ntfy: Option<NtfyConfig>,
     #[serde(default)]
     pub clients: Vec<ClientConfig>,
@@ -617,6 +840,14 @@ pub struct BackupStats {
     pub deduplicated_size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_new: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_changed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_added: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1000,12 +1231,14 @@ admin_user = "admin"
                 poll_interval_secs: 20,
                 poll_timeout_secs: 120,
                 shutdown_idle_minutes: 90,
+                broadcast: default_broadcast(),
             },
             borg: BorgConfig {
                 binary: "/usr/bin/borg".to_string(),
                 check_frequency_days: 14,
                 lock_wait_secs: 300,
             },
+            restic: ResticConfig::default(),
             ntfy: Some(NtfyConfig {
                 url: "https://ntfy.example.com/topic".to_string(),
                 token: Some("tk_test".to_string()),
@@ -1070,8 +1303,8 @@ optional = true
         let cfg = Config::load(&path).unwrap();
         let client = cfg.find_client("alpha").unwrap();
         assert_eq!(client.repos.len(), 2);
-        assert_eq!(client.main_repo().unwrap().path, "ssh://user@host/repo");
-        assert_eq!(client.find_repo("offsite").unwrap().path, "ssh://user@host/offsite");
+        assert_eq!(client.main_repo().unwrap().path(), "ssh://user@host/repo");
+        assert_eq!(client.find_repo("offsite").unwrap().path(), "ssh://user@host/offsite");
         assert!(client.find_repo("offsite").unwrap().optional);
     }
 
@@ -1092,6 +1325,10 @@ optional = true
                 compressed_size: 800,
                 deduplicated_size: 200,
                 archive_name: Some("test-archive".to_string()),
+                files_new: None,
+                files_changed: None,
+                data_added: None,
+                snapshot_id: None,
             }),
         });
 
@@ -1218,8 +1455,10 @@ optional = true
                 poll_interval_secs: 15,
                 poll_timeout_secs: 300,
                 shutdown_idle_minutes: 90,
+                broadcast: default_broadcast(),
             },
             borg: BorgConfig::default(),
+            restic: ResticConfig::default(),
             ntfy: None,
             clients: vec![
                 ClientConfig {
@@ -1247,21 +1486,13 @@ optional = true
     }
 
     fn dummy_repo(name: &str) -> RepoConfig {
-        RepoConfig {
-            name: name.to_string(),
-            path: "ssh://user@host/repo".to_string(),
-            ssh_key: "/tmp/key".to_string(),
-            passphrase_file: "/tmp/pass".to_string(),
-            sources: vec!["/data".to_string()],
-            compression: "auto,zstd".to_string(),
-            exclude_patterns: vec![],
-            exclude_patterns_from: vec![],
-            exclude_if_present: vec![],
-            borg_filter: None,
-            optional: false,
-            retention: None,
-            pre_create_commands: None,
-            post_create_commands: None,
-        }
+        let mut r = RepoConfig::new_borg(
+            name,
+            "ssh://user@host/repo",
+            "/tmp/key",
+            "/tmp/pass",
+        );
+        r.sources = vec!["/data".to_string()];
+        r
     }
 }

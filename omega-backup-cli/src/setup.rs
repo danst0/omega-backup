@@ -5,7 +5,7 @@ use tokio::process::Command;
 
 use omega_backup_lib::config::{
     BorgConfig, ClientConfig, Config, DistributionConfig, KeysConfig, MachineRole, NtfyConfig,
-    RepoConfig, RetentionConfig, ScheduleConfig, ServerConfig, UpdateConfig, default_config_path, expand_tilde,
+    RepoConfig, ResticConfig, RetentionConfig, ScheduleConfig, ServerConfig, UpdateConfig, default_config_path, expand_tilde,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -160,22 +160,14 @@ async fn run_add_repo_wizard(config_path: &std::path::Path) -> Result<()> {
         println!("Generated passphrase → {}", pass_path.display());
     }
 
-    let new_repo = RepoConfig {
-        name: repo_name.clone(),
-        path: repo_path,
-        ssh_key: ssh_key_path.display().to_string(),
-        passphrase_file: pass_path.display().to_string(),
-        sources,
-        compression: "auto,zstd".to_string(),
-        exclude_patterns: vec![],
-        exclude_patterns_from: vec![],
-        exclude_if_present: vec![],
-        borg_filter: None,
-        optional,
-        retention: None,
-        pre_create_commands: None,
-        post_create_commands: None,
-    };
+    let mut new_repo = RepoConfig::new_borg(
+        repo_name.clone(),
+        repo_path,
+        ssh_key_path.display().to_string(),
+        pass_path.display().to_string(),
+    );
+    new_repo.sources = sources;
+    new_repo.optional = optional;
 
     client.repos.push(new_repo);
     config.save(config_path)?;
@@ -251,7 +243,11 @@ async fn run_edit_client_wizard(config_path: &std::path::Path) -> Result<()> {
     let mut repos_with_new_keys: Vec<usize> = vec![];
 
     for (i, repo) in client.repos.iter_mut().enumerate() {
-        println!("\n  --- SSH key for repo '{}' (current: {}) ---", repo.name, repo.ssh_key);
+        let current_ssh_key = match &repo.backend {
+            omega_backup_lib::config::RepoBackend::Borg { ssh_key, .. } => ssh_key.clone(),
+            _ => { continue; } // skip non-borg repos for SSH key regeneration
+        };
+        println!("\n  --- SSH key for repo '{}' (current: {}) ---", repo.name, current_ssh_key);
         let regen = Confirm::new()
             .with_prompt(format!("  Regenerate SSH key for repo '{}'?", repo.name))
             .default(false)
@@ -275,7 +271,9 @@ async fn run_edit_client_wizard(config_path: &std::path::Path) -> Result<()> {
             }
 
             generate_ssh_key(&new_key_path, &format!("borg-{client_name}-{}", repo.name)).await?;
-            repo.ssh_key = new_key_path.display().to_string();
+            if let omega_backup_lib::config::RepoBackend::Borg { ref mut ssh_key, .. } = repo.backend {
+                *ssh_key = new_key_path.display().to_string();
+            }
             repos_with_new_keys.push(i);
         }
     }
@@ -431,40 +429,26 @@ async fn run_client_wizard() -> Result<()> {
 
     // Build repos
     let server_base = format!("ssh://borguser@{server_host}");
-    let mut repos = vec![RepoConfig {
-        name: "main".to_string(),
-        path: format!("{server_base}/backup/repos/{client_name}"),
-        ssh_key: borg_main_key.display().to_string(),
-        passphrase_file: pass_main_path.display().to_string(),
-        sources,
-        compression: "auto,zstd".to_string(),
-        exclude_patterns: vec!["sh:/home/*/.cache".to_string()],
-        exclude_patterns_from: vec![],
-        exclude_if_present: vec![],
-        borg_filter: None,
-        optional: false,
-        retention: None,
-        pre_create_commands: None,
-        post_create_commands: None,
-    }];
+    let mut main_repo = RepoConfig::new_borg(
+        "main",
+        format!("{server_base}/backup/repos/{client_name}"),
+        borg_main_key.display().to_string(),
+        pass_main_path.display().to_string(),
+    );
+    main_repo.sources = sources;
+    main_repo.exclude_patterns = vec!["sh:/home/*/.cache".to_string()];
+    let mut repos = vec![main_repo];
 
     if use_offsite {
-        repos.push(RepoConfig {
-            name: "offsite".to_string(),
-            path: format!("{server_base}/mnt/offsite/repos/{client_name}"),
-            ssh_key: borg_offsite_key.as_ref().unwrap().display().to_string(),
-            passphrase_file: pass_offsite_path.as_ref().unwrap().display().to_string(),
-            sources: offsite_sources,
-            compression: "auto,zstd".to_string(),
-            exclude_patterns: vec![],
-            exclude_patterns_from: vec![],
-            exclude_if_present: vec![],
-            borg_filter: None,
-            optional: true,
-            retention: None,
-            pre_create_commands: None,
-            post_create_commands: None,
-        });
+        let mut offsite_repo = RepoConfig::new_borg(
+            "offsite",
+            format!("{server_base}/mnt/offsite/repos/{client_name}"),
+            borg_offsite_key.as_ref().unwrap().display().to_string(),
+            pass_offsite_path.as_ref().unwrap().display().to_string(),
+        );
+        offsite_repo.sources = offsite_sources;
+        offsite_repo.optional = true;
+        repos.push(offsite_repo);
     }
 
     let client = ClientConfig {
@@ -489,8 +473,10 @@ async fn run_client_wizard() -> Result<()> {
             poll_interval_secs: 15,
             poll_timeout_secs: 300,
             shutdown_idle_minutes: 90,
+            broadcast: "255.255.255.255".to_string(),
         },
         borg: BorgConfig::default(),
+        restic: ResticConfig::default(),
         ntfy,
         clients: vec![client],
         keys: KeysConfig {
@@ -659,44 +645,26 @@ async fn run_management_wizard() -> Result<()> {
         generate_ssh_key(&main_key, &format!("borg-{name}-main")).await?;
 
         let server_base = format!("ssh://borgmgmt@{server_host}");
-        let mut repos = vec![RepoConfig {
-            name: "main".to_string(),
-            path: format!("{server_base}/backup/repos/{name}"),
-            ssh_key: main_key.display().to_string(),
-            passphrase_file: pass_main,
-            sources: vec![],
-            compression: "auto,zstd".to_string(),
-            exclude_patterns: vec![],
-            exclude_patterns_from: vec![],
-            exclude_if_present: vec![],
-            borg_filter: None,
-            optional: false,
-            retention: None,
-            pre_create_commands: None,
-            post_create_commands: None,
-        }];
+        let mut repos = vec![RepoConfig::new_borg(
+            "main",
+            format!("{server_base}/backup/repos/{name}"),
+            main_key.display().to_string(),
+            pass_main,
+        )];
 
         if let Some(pass) = offsite_pass {
             let offsite_key = ssh_dir.join(format!("borg_{name}_offsite_ed25519"));
             println!("  Generating SSH key for {name}/offsite...");
             generate_ssh_key(&offsite_key, &format!("borg-{name}-offsite")).await?;
 
-            repos.push(RepoConfig {
-                name: "offsite".to_string(),
-                path: format!("{server_base}/mnt/offsite/repos/{name}"),
-                ssh_key: offsite_key.display().to_string(),
-                passphrase_file: pass,
-                sources: vec![],
-                compression: "auto,zstd".to_string(),
-                exclude_patterns: vec![],
-                exclude_patterns_from: vec![],
-                exclude_if_present: vec![],
-                borg_filter: None,
-                optional: true,
-                retention: None,
-                pre_create_commands: None,
-                post_create_commands: None,
-            });
+            let mut offsite_repo = RepoConfig::new_borg(
+                "offsite",
+                format!("{server_base}/mnt/offsite/repos/{name}"),
+                offsite_key.display().to_string(),
+                pass,
+            );
+            offsite_repo.optional = true;
+            repos.push(offsite_repo);
         }
 
         clients.push(ClientConfig {
@@ -715,7 +683,7 @@ async fn run_management_wizard() -> Result<()> {
             set_dir_permissions(&keys_dir, 0o700);
 
             if let Some(main_repo) = local_client.main_repo() {
-                let pass_path = expand_tilde(&main_repo.passphrase_file);
+                let pass_path = expand_tilde(main_repo.backend.password_file());
                 if !pass_path.exists() {
                     let passphrase = generate_passphrase();
                     std::fs::write(&pass_path, &passphrase)
@@ -753,8 +721,10 @@ async fn run_management_wizard() -> Result<()> {
             poll_interval_secs: 15,
             poll_timeout_secs: 300,
             shutdown_idle_minutes: 90,
+            broadcast: "255.255.255.255".to_string(),
         },
         borg: BorgConfig::default(),
+        restic: ResticConfig::default(),
         ntfy,
         clients,
         keys: KeysConfig {
@@ -965,40 +935,26 @@ async fn run_both_wizard() -> Result<()> {
 
     // Build local client repos
     let server_base = format!("ssh://borguser@{server_host}");
-    let mut local_repos = vec![RepoConfig {
-        name: "main".to_string(),
-        path: format!("{server_base}/backup/repos/{client_name}"),
-        ssh_key: borg_main_key.display().to_string(),
-        passphrase_file: pass_main_path.display().to_string(),
-        sources,
-        compression: "auto,zstd".to_string(),
-        exclude_patterns: vec!["sh:/home/*/.cache".to_string()],
-        exclude_patterns_from: vec![],
-        exclude_if_present: vec![],
-        borg_filter: None,
-        optional: false,
-        retention: None,
-        pre_create_commands: None,
-        post_create_commands: None,
-    }];
+    let mut local_main = RepoConfig::new_borg(
+        "main",
+        format!("{server_base}/backup/repos/{client_name}"),
+        borg_main_key.display().to_string(),
+        pass_main_path.display().to_string(),
+    );
+    local_main.sources = sources;
+    local_main.exclude_patterns = vec!["sh:/home/*/.cache".to_string()];
+    let mut local_repos = vec![local_main];
 
     if use_offsite {
-        local_repos.push(RepoConfig {
-            name: "offsite".to_string(),
-            path: format!("{server_base}/mnt/offsite/repos/{client_name}"),
-            ssh_key: borg_offsite_key.as_ref().unwrap().display().to_string(),
-            passphrase_file: pass_offsite_path.as_ref().unwrap().display().to_string(),
-            sources: offsite_sources,
-            compression: "auto,zstd".to_string(),
-            exclude_patterns: vec![],
-            exclude_patterns_from: vec![],
-            exclude_if_present: vec![],
-            borg_filter: None,
-            optional: true,
-            retention: None,
-            pre_create_commands: None,
-            post_create_commands: None,
-        });
+        let mut offsite_repo = RepoConfig::new_borg(
+            "offsite",
+            format!("{server_base}/mnt/offsite/repos/{client_name}"),
+            borg_offsite_key.as_ref().unwrap().display().to_string(),
+            pass_offsite_path.as_ref().unwrap().display().to_string(),
+        );
+        offsite_repo.sources = offsite_sources;
+        offsite_repo.optional = true;
+        local_repos.push(offsite_repo);
     }
 
     let mut clients = vec![ClientConfig {
@@ -1055,44 +1011,26 @@ async fn run_both_wizard() -> Result<()> {
             generate_ssh_key(&main_key, &format!("borg-{name}-main")).await?;
 
             let mgmt_base = format!("ssh://borgmgmt@{server_host}");
-            let mut repos = vec![RepoConfig {
-                name: "main".to_string(),
-                path: format!("{mgmt_base}/backup/repos/{name}"),
-                ssh_key: main_key.display().to_string(),
-                passphrase_file: pass_main_remote,
-                sources: vec![],
-                compression: "auto,zstd".to_string(),
-                exclude_patterns: vec![],
-                exclude_patterns_from: vec![],
-                exclude_if_present: vec![],
-                borg_filter: None,
-                optional: false,
-                retention: None,
-                pre_create_commands: None,
-                post_create_commands: None,
-            }];
+            let mut repos = vec![RepoConfig::new_borg(
+                "main",
+                format!("{mgmt_base}/backup/repos/{name}"),
+                main_key.display().to_string(),
+                pass_main_remote,
+            )];
 
             if let Some(pass) = offsite_pass {
                 let offsite_key = ssh_dir.join(format!("borg_{name}_offsite_ed25519"));
                 println!("  Generating SSH key for {name}/offsite...");
                 generate_ssh_key(&offsite_key, &format!("borg-{name}-offsite")).await?;
 
-                repos.push(RepoConfig {
-                    name: "offsite".to_string(),
-                    path: format!("{mgmt_base}/mnt/offsite/repos/{name}"),
-                    ssh_key: offsite_key.display().to_string(),
-                    passphrase_file: pass,
-                    sources: vec![],
-                    compression: "auto,zstd".to_string(),
-                    exclude_patterns: vec![],
-                    exclude_patterns_from: vec![],
-                    exclude_if_present: vec![],
-                    borg_filter: None,
-                    optional: true,
-                    retention: None,
-                    pre_create_commands: None,
-                    post_create_commands: None,
-                });
+                let mut offsite_repo = RepoConfig::new_borg(
+                    "offsite",
+                    format!("{mgmt_base}/mnt/offsite/repos/{name}"),
+                    offsite_key.display().to_string(),
+                    pass,
+                );
+                offsite_repo.optional = true;
+                repos.push(offsite_repo);
             }
 
             clients.push(ClientConfig {
@@ -1130,8 +1068,10 @@ async fn run_both_wizard() -> Result<()> {
             poll_interval_secs: 15,
             poll_timeout_secs: 300,
             shutdown_idle_minutes: 90,
+            broadcast: "255.255.255.255".to_string(),
         },
         borg: BorgConfig::default(),
+        restic: ResticConfig::default(),
         ntfy,
         clients,
         keys: KeysConfig {
@@ -1201,19 +1141,20 @@ fn generate_passphrase() -> String {
 
 /// Print the authorized_keys snippet for a single client repo key.
 fn print_repo_key_instructions(client_name: &str, repo: &RepoConfig) {
-    let key_path = PathBuf::from(&repo.ssh_key);
+    let key_path = PathBuf::from(repo.ssh_key());
     let pubkey = read_pubkey(&key_path);
 
     // Extract filesystem path from ssh://user@host/path/to/repo
-    let repo_path = if let Some(scheme_end) = repo.path.find("://") {
-        let after_scheme = &repo.path[scheme_end + 3..];
+    let path = repo.path();
+    let repo_path = if let Some(scheme_end) = path.find("://") {
+        let after_scheme = &path[scheme_end + 3..];
         if let Some(slash_idx) = after_scheme.find('/') {
             after_scheme[slash_idx..].to_string()
         } else {
-            repo.path.clone()
+            path.to_string()
         }
     } else {
-        repo.path.clone()
+        path.to_string()
     };
 
     let comment = format!("borg-{client_name}-{}", repo.name);

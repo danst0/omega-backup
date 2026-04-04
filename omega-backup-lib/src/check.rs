@@ -75,7 +75,7 @@ pub async fn run_check(config: &Config) -> Result<()> {
         println!("\nChecking {} clients...", config.clients.len());
         for client in &config.clients {
             for repo in &client.repos {
-                println!("   - {}/{}: Repo {}", client.name, repo.name, repo.path);
+                println!("   - {}/{}: Repo {}", client.name, repo.name, repo.backend.repo_path());
             }
         }
     }

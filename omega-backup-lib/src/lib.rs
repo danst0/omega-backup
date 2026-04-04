@@ -7,6 +7,7 @@ pub mod init;
 pub mod maintenance;
 pub mod ntfy;
 pub mod reset;
+pub mod restic;
 pub mod restore;
 pub mod ssh;
 pub mod status;

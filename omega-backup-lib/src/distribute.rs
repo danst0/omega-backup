@@ -370,7 +370,7 @@ pub async fn run_sync(config: &Config, client_name: &str, host: Option<&str>) ->
             if resp.status().is_success() {
                 let encrypted = resp.bytes().await?;
                 let passphrase = decrypt(&session_key, &encrypted)?;
-                let pass_path = expand_tilde(&repo.passphrase_file);
+                let pass_path = expand_tilde(repo.passphrase_file());
                 if let Some(parent) = pass_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }

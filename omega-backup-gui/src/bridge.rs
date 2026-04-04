@@ -164,8 +164,8 @@ async fn backend_loop(
                     let mut state = AppState::load().unwrap_or_default();
                     for client in &cfg.clients {
                         if let Some(repo) = client.main_repo() {
-                            let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
-                                .with_ssh_key(&repo.ssh_key)
+                            let ctx = BorgContext::new(repo.path(), repo.passphrase_file())
+                                .with_ssh_key(repo.ssh_key())
                                 .with_binary(&cfg.borg.binary)
                                 .with_lock_wait(cfg.borg.lock_wait_secs);
                             if let Ok(Some(info)) = borg::list_latest(&ctx).await {
@@ -211,7 +211,7 @@ async fn backend_loop(
                     let _ = ui_tx.send(UiEvent::Error("Config not loaded".into())).await;
                     continue;
                 };
-                match wol::wake(&cfg.server.mac) {
+                match wol::wake(&cfg.server.mac, &cfg.server.broadcast) {
                     Ok(()) => {
                         let id = next_op_id();
                         let _ = ui_tx

@@ -35,7 +35,7 @@ pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs, log
     // Show what will be reset and confirm
     log_line(&log_tx, format!("Will reset the following for client '{}':", client_name));
     for repo in &repos {
-        log_line(&log_tx, format!("  - {} repo: {}", repo.name, repo.path));
+        log_line(&log_tx, format!("  - {} repo: {}", repo.name, repo.backend.repo_path()));
     }
     log_line(&log_tx, "");
     log_line(&log_tx, "This will PERMANENTLY DELETE these repositories and reinitialize them.");
@@ -55,7 +55,7 @@ pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs, log
 
     // Wake the server
     tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
-    wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
+    wol::wake(&config.server.mac, &config.server.broadcast).context("Failed to send WoL packet")?;
 
     let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
         .with_timeout(config.server.poll_interval_secs as u32);
@@ -81,16 +81,16 @@ pub async fn run_reset(config: &Config, client_name: &str, args: &ResetArgs, log
         }
 
         log_line(&log_tx, format!("\n--- Resetting {} repo ---", repo.name));
-        let server_path = parse_repo_server_path(&repo.path)?;
+        let server_path = parse_repo_server_path(repo.path())?;
         let key_path = keys_dir.join(format!("{}-{}.key", client_name, repo.name));
 
         reset_repo(&ssh, &server_path, &key_path, args.dry_run, &log_tx).await?;
 
         reinit_repo(
             config,
-            &repo.path,
-            &repo.passphrase_file,
-            &repo.ssh_key,
+            repo.path(),
+            repo.passphrase_file(),
+            repo.ssh_key(),
             &key_path,
             args.dry_run,
             args.verbose,

@@ -28,7 +28,7 @@ pub async fn run_status(config: &Config) -> Result<()> {
 
     // Wake server and wait for SSH
     println!("Waking backup server...");
-    wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
+    wol::wake(&config.server.mac, &config.server.broadcast).context("Failed to send WoL packet")?;
 
     let server_online = match ssh::poll_until_reachable(
         &ssh_cfg,
@@ -68,8 +68,8 @@ pub async fn run_status(config: &Config) -> Result<()> {
             let Some(repo) = repo else {
                 return (client.name.clone(), None);
             };
-            let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
-                .with_ssh_key(&repo.ssh_key)
+            let ctx = BorgContext::new(repo.path(), repo.passphrase_file())
+                .with_ssh_key(repo.ssh_key())
                 .with_binary(borg_binary)
                 .with_lock_wait(lock_wait);
             match borg::list_latest(&ctx).await {

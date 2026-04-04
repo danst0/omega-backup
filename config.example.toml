@@ -7,6 +7,7 @@ admin_user = "admin"
 poll_interval_secs = 15    # default
 poll_timeout_secs = 300    # default
 shutdown_idle_minutes = 90 # shut down after this many minutes with no active backups
+# broadcast = "10.0.5.255"  # directed broadcast for cross-subnet WoL (default: 255.255.255.255)
 
 [borg]
 binary = "borg"            # or "/opt/borg/borg" for a specific version
@@ -53,6 +54,25 @@ optional = true   # errors are warnings, not failures
 # keep_weekly = 2
 # keep_monthly = 6
 # keep_yearly = 0
+
+# --- Restic repo example (Google Drive via rclone) ---
+# Requires: restic binary + rclone configured with a remote (run `rclone config` first)
+# Encryption is handled by restic (AES-256), deduplication is built-in.
+# To use an encrypted rclone remote (rclone crypt), just point to the crypt remote name.
+#
+# [[clients.repos]]
+# name = "gdrive"
+# type = "restic"
+# repo = "rclone:gdrive:backup/client1"     # any rclone remote works
+# password_file = "~/.borg-keys/gdrive.pass"
+# sources = ["/home/user/documents", "/home/user/photos"]
+# exclude_patterns = [".cache/**", "*.tmp"]
+# optional = true
+# # rclone_config = "~/.config/rclone/rclone.conf"   # optional, uses default if omitted
+# # extra_flags = ["--limit-upload=10000"]             # optional restic flags
+
+# [restic]
+# binary = "restic"   # optional, defaults to "restic"
 
 [keys]
 local_dir = "~/.borg-keys/"              # keyfiles + passphrases stored locally

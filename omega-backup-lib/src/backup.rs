@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use crate::{
     borg::{self, BorgContext},
-    config::{AppState, BackupStats, ClientConfig, Config, OperationRecord, OperationResult, OperationType, RepoConfig},
+    config::{AppState, BackupStats, ClientConfig, Config, OperationRecord, OperationResult, OperationType, RepoBackend, RepoConfig},
+    restic::{self, ResticContext},
     ntfy::{self, NotificationSummary, NtfyConfig},
     ssh::{self, SshConfig, count_lockfiles, remove_lockfile, set_lockfile},
     wol,
@@ -66,6 +67,8 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
 
     println!("Starting backup for client: {}", client.name);
 
+    let has_borg_repos = repos.iter().any(|r| r.is_borg());
+
     // Build SSH config (used for WoL poll, lockfiles, and shutdown check)
     let mut ssh = SshConfig::new(&config.server.host, &config.server.admin_user)
         .with_timeout(10);
@@ -73,30 +76,34 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
         ssh = ssh.with_key(key);
     }
 
-    if config.server_is_local() {
-        tracing::info!("Server is local — skipping Wake-on-LAN and SSH poll");
-    } else {
-        // Step 1: Wake-on-LAN
-        tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
-        wol::wake(&config.server.mac).context("Failed to send WoL packet")?;
+    if has_borg_repos {
+        if config.server_is_local() {
+            tracing::info!("Server is local — skipping Wake-on-LAN and SSH poll");
+        } else {
+            // Step 1: Wake-on-LAN
+            tracing::info!("Sending Wake-on-LAN to {}", config.server.host);
+            wol::wake(&config.server.mac, &config.server.broadcast).context("Failed to send WoL packet")?;
 
-        // Step 2: SSH poll
-        println!("Waiting for backup server to come online...");
-        ssh::poll_until_reachable(
-            &ssh,
-            Duration::from_secs(config.server.poll_interval_secs),
-            Duration::from_secs(config.server.poll_timeout_secs),
-        )
-        .await
-        .context("Backup server did not come online in time")?;
-    }
-
-    // Step 3: Set lockfile
-    if !args.dry_run {
-        set_lockfile(&ssh, &client.hostname)
+            // Step 2: SSH poll
+            println!("Waiting for backup server to come online...");
+            ssh::poll_until_reachable(
+                &ssh,
+                Duration::from_secs(config.server.poll_interval_secs),
+                Duration::from_secs(config.server.poll_timeout_secs),
+            )
             .await
-            .context("Failed to set lockfile")?;
-        tracing::info!("Set lockfile for {}", client.hostname);
+            .context("Backup server did not come online in time")?;
+        }
+
+        // Step 3: Set lockfile
+        if !args.dry_run {
+            set_lockfile(&ssh, &client.hostname)
+                .await
+                .context("Failed to set lockfile")?;
+            tracing::info!("Set lockfile for {}", client.hostname);
+        }
+    } else {
+        tracing::info!("No borg repos selected — skipping WoL/SSH/lockfile");
     }
 
     let mut overall_success = true;
@@ -105,33 +112,66 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
     let mut total_dedup = 0u64;
     let mut state = AppState::load().unwrap_or_default();
 
-    // Step 4: borg create for each selected repo
+    // Step 4: backup each selected repo (borg or restic)
     for repo in &repos {
-        let result = run_create(config, client, repo, args).await;
         let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-        match result {
-            Ok(create_result) => {
+
+        let backup_result: Result<(f64, BackupStats, String)> = match &repo.backend {
+            RepoBackend::Borg { .. } => {
+                run_borg_create(config, client, repo, args).await.map(|r| {
+                    let label = r.archive_name.clone();
+                    (r.duration_secs, BackupStats {
+                        original_size: r.original_size,
+                        compressed_size: r.compressed_size,
+                        deduplicated_size: r.deduplicated_size,
+                        archive_name: Some(r.archive_name),
+                        files_new: None,
+                        files_changed: None,
+                        data_added: None,
+                        snapshot_id: None,
+                    }, label)
+                })
+            }
+            RepoBackend::Restic { .. } => {
+                run_restic_backup(config, repo, args).await.map(|r| {
+                    let label = r.snapshot_id.clone();
+                    (r.duration_secs, BackupStats {
+                        original_size: 0,
+                        compressed_size: 0,
+                        deduplicated_size: 0,
+                        archive_name: None,
+                        files_new: Some(r.files_new),
+                        files_changed: Some(r.files_changed),
+                        data_added: Some(r.data_added),
+                        snapshot_id: Some(r.snapshot_id),
+                    }, label)
+                })
+            }
+        };
+
+        match backup_result {
+            Ok((duration, stats, label)) => {
+                let size_info = if stats.deduplicated_size > 0 {
+                    format!("dedup {} B", stats.deduplicated_size)
+                } else {
+                    format!("added {} B", stats.data_added.unwrap_or(0))
+                };
                 messages.push(format!(
-                    "{} backup: OK ({:.1}s, dedup {} B)",
-                    repo.name, create_result.duration_secs, create_result.deduplicated_size
+                    "{} backup: OK ({:.1}s, {})",
+                    repo.name, duration, size_info
                 ));
-                total_duration += create_result.duration_secs;
-                total_dedup += create_result.deduplicated_size;
-                tracing::info!("{} backup complete: {}", repo.name, create_result.archive_name);
+                total_duration += duration;
+                total_dedup += stats.deduplicated_size.max(stats.data_added.unwrap_or(0));
+                tracing::info!("{} backup complete: {}", repo.name, label);
 
                 if !args.dry_run {
                     state.record_operation(&client.name, &repo.name, OperationRecord {
                         operation: OperationType::Backup,
                         timestamp,
-                        duration_secs: Some(create_result.duration_secs),
+                        duration_secs: Some(duration),
                         result: OperationResult::Success,
                         message: None,
-                        stats: Some(BackupStats {
-                            original_size: create_result.original_size,
-                            compressed_size: create_result.compressed_size,
-                            deduplicated_size: create_result.deduplicated_size,
-                            archive_name: Some(create_result.archive_name.clone()),
-                        }),
+                        stats: Some(stats),
                     });
                 }
             }
@@ -160,7 +200,7 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
     }
 
     // Step 5: Remove lockfile
-    if !args.dry_run {
+    if has_borg_repos && !args.dry_run {
         let _ = remove_lockfile(&ssh, &client.hostname).await;
     }
 
@@ -192,7 +232,7 @@ pub async fn run_backup(config: &Config, args: &BackupArgs) -> Result<()> {
     }
 
     // Step 8: Report lockfile status (shutdown is handled by the server-side watcher)
-    if !args.dry_run {
+    if has_borg_repos && !args.dry_run {
         match count_lockfiles(&ssh).await {
             Ok(0) => {
                 tracing::info!("No more lockfiles — server will auto-shut down via watcher");
@@ -257,14 +297,14 @@ async fn run_hook_commands(label: &str, commands: &[String], abort_on_failure: b
     Ok(())
 }
 
-async fn run_create(
+async fn run_borg_create(
     config: &Config,
     client: &ClientConfig,
     repo: &RepoConfig,
     args: &BackupArgs,
 ) -> Result<borg::BorgCreateResult> {
-    let ctx = BorgContext::new(&repo.path, &repo.passphrase_file)
-        .with_ssh_key(&repo.ssh_key)
+    let ctx = BorgContext::new(repo.path(), repo.passphrase_file())
+        .with_ssh_key(repo.ssh_key())
         .with_binary(&config.borg.binary)
         .with_dry_run(args.dry_run)
         .with_verbose(args.verbose)
@@ -282,14 +322,14 @@ async fn run_create(
         &ctx,
         &client.hostname,
         &repo.sources,
-        &repo.compression,
+        repo.compression(),
         &repo.exclude_patterns,
         &repo.exclude_patterns_from,
         &repo.exclude_if_present,
-        repo.borg_filter.as_deref(),
+        repo.borg_filter(),
     )
     .await
-    .with_context(|| format!("borg create failed for {}", repo.path));
+    .with_context(|| format!("borg create failed for {}", repo.path()));
 
     if !args.dry_run {
         if let Some(ref cmds) = repo.post_create_commands {
@@ -298,4 +338,54 @@ async fn run_create(
     }
 
     borg_result
+}
+
+async fn run_restic_backup(
+    config: &Config,
+    repo: &RepoConfig,
+    args: &BackupArgs,
+) -> Result<restic::ResticBackupResult> {
+    let (restic_repo, password_file, rclone_config, extra_flags) = match &repo.backend {
+        RepoBackend::Restic { repo: r, password_file, rclone_config, extra_flags } => {
+            (r.as_str(), password_file.as_str(), rclone_config.as_deref(), extra_flags.clone())
+        }
+        _ => anyhow::bail!("run_restic_backup called on non-restic repo"),
+    };
+
+    let mut ctx = ResticContext::new(restic_repo, password_file)
+        .with_binary(&config.restic.binary)
+        .with_dry_run(args.dry_run)
+        .with_verbose(args.verbose);
+    if let Some(rc) = rclone_config {
+        ctx = ctx.with_rclone_config(rc);
+    }
+    for flag in &extra_flags {
+        ctx = ctx.with_extra_flag(flag);
+    }
+
+    if !args.dry_run {
+        if let Some(ref cmds) = repo.pre_create_commands {
+            run_hook_commands(&format!("pre:{}", repo.name), cmds, true)
+                .await
+                .with_context(|| format!("Pre-create hook failed for repo '{}'", repo.name))?;
+        }
+    }
+
+    let result = restic::backup(
+        &ctx,
+        &repo.sources,
+        &repo.exclude_patterns,
+        &repo.exclude_patterns_from,
+        &repo.exclude_if_present,
+    )
+    .await
+    .with_context(|| format!("restic backup failed for {}", restic_repo));
+
+    if !args.dry_run {
+        if let Some(ref cmds) = repo.post_create_commands {
+            let _ = run_hook_commands(&format!("post:{}", repo.name), cmds, false).await;
+        }
+    }
+
+    result
 }
